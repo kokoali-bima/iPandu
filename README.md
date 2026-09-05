@@ -1,4 +1,25 @@
-# iSmart-LA (Lite Agent)
+# iPandu
+
+Asisten AI Infrasoft, dikendalikan lewat Telegram — dan tetap membawa kemampuan
+infrastruktur penuh dari [iSmart-LA](https://github.com/kokoali-bima/iSmart-LA).
+
+*Pandu* = pemandu. Telegram tetap satu-satunya antarmuka; kanal lain (email,
+WhatsApp, kalender) dipakai sebagai **alat**, bukan sebagai GUI kedua.
+
+> **Status: v0.1.0 -- eksperimental.** Ini repo tempat mencoba hal baru. Yang
+> dipakai produksi adalah iSmart-LA, bukan ini. Kalau Anda mencari agent yang
+> stabil untuk mengurus cluster, pakai repo itu.
+>
+> Fork dari iSmart-LA v0.2b.76. Baca **[FORK.md](FORK.md)** sebelum mengubah
+> apa pun: ada satu aturan merge yang menentukan apakah perbaikan dari produksi
+> masih bisa ditarik ke sini, atau setiap bug harus diperbaiki dua kali.
+
+Di bawah ini dokumentasi yang diwarisi dari iSmart-LA. Sebagian besar masih
+berlaku apa adanya — 79% kodenya memang sama.
+
+---
+
+## Warisan dari iSmart-LA (Lite Agent)
 
 A lightweight Telegram bridge to **Claude Code** and **Antigravity CLI (agy)**, for
 infrastructure monitoring and investigation -- built to be dramatically cheaper to run
@@ -6,11 +27,6 @@ than a full agent framework, while staying just as capable for real operational 
 A report doesn't have to stop at the chat: it can land straight in a shared
 [Google Drive](#google-drive-optional) folder too, connected the same explicit way as
 everything else here -- through Telegram, not a config file.
-
-> **Status: v0.2b.76 -- early/beta.** Built and battle-tested against a real production
-> Proxmox VE cluster over several days of iteration, including a live-fire test of the
-> unlock/PIN/snapshot flow against real infrastructure. Works well; still has known
-> rough edges (see [Known limitations](#known-limitations)).
 
 ## Why this exists
 

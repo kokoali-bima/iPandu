@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.1.0 -- iPandu berpisah dari iSmart-LA
+
+Fork dari iSmart-LA **v0.2b.76** (`95578c7`), 5 September 2026, dengan riwayat
+114 commit dibawa utuh.
+
+Alasannya bukan kodenya berbeda -- 79% substratnya sama persis. Alasannya
+**disiplin rilis**: iSmart-LA sedang menuju produksi dan harus distabilkan,
+sementara asisten ini justru perlu dicoba-coba dan boleh rusak. Dua tujuan itu
+tidak bisa hidup di satu repo tanpa salah satunya mengalah.
+
+Yang berubah di titik fork, semuanya di luar `lite_agent.py`:
+
+- `FORK.md` -- hubungan kedua repo, aturan merge satu arah, dan disiplin yang
+  membuatnya bertahan.
+- `README.md` -- identitas iPandu di atas, dokumentasi warisan di bawahnya.
+- Garis versi sendiri mulai `v0.1.0`. Tag iSmart-LA sengaja **tidak** dibawa,
+  supaya `current_version()` tidak pernah melaporkan versi produksi di mesin
+  asisten. Kode tidak perlu disentuh sama sekali untuk itu.
+- Remote `upstream` dikunci untuk push, jadi merge terbalik ke produksi tidak
+  bisa terjadi karena kelalaian.
+
+Arah pengembangan: Telegram tetap satu-satunya antarmuka; email, WhatsApp dan
+kalender masuk sebagai **alat** lewat protokol penanda yang sudah ada, bukan
+sebagai GUI kedua. Kemampuan infrastruktur dipertahankan, tapi dengan pasangan
+kunci SSH sendiri -- VM berbeda saja tidak memisahkan risiko kalau kuncinya
+sama.
+
+Basis: 839 tes, 38 suite, semuanya lulus di titik fork.
+
 ## v0.2b.76 -- the whole class, not the three that fired
 
 v0.2b.75 fixed three crashes that shared one shape: code reached for
