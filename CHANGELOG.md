@@ -1,33 +1,34 @@
 # Changelog
 
-## v0.1.0 -- iPandu berpisah dari iSmart-LA
+## v0.1.0 -- iPandu splits off from iSmart-LA
 
-Fork dari iSmart-LA **v0.2b.76** (`95578c7`), 5 September 2026, dengan riwayat
-114 commit dibawa utuh.
+Forked from iSmart-LA **v0.2b.76** (`95578c7`) on 5 September 2026, carrying all
+114 commits of history.
 
-Alasannya bukan kodenya berbeda -- 79% substratnya sama persis. Alasannya
-**disiplin rilis**: iSmart-LA sedang menuju produksi dan harus distabilkan,
-sementara asisten ini justru perlu dicoba-coba dan boleh rusak. Dua tujuan itu
-tidak bisa hidup di satu repo tanpa salah satunya mengalah.
+The reason is not that the code differs -- 79% of the substrate is identical.
+The reason is **release discipline**: iSmart-LA is being stabilised toward a
+production release, while this assistant needs to be experimented on and
+allowed to break. Those two goals cannot share a repo without one of them
+losing.
 
-Yang berubah di titik fork, semuanya di luar `lite_agent.py`:
+Everything changed at the fork point sits **outside `lite_agent.py`**, which is
+the discipline that keeps merges from upstream clean:
 
-- `FORK.md` -- hubungan kedua repo, aturan merge satu arah, dan disiplin yang
-  membuatnya bertahan.
-- `README.md` -- identitas iPandu di atas, dokumentasi warisan di bawahnya.
-- Garis versi sendiri mulai `v0.1.0`. Tag iSmart-LA sengaja **tidak** dibawa,
-  supaya `current_version()` tidak pernah melaporkan versi produksi di mesin
-  asisten. Kode tidak perlu disentuh sama sekali untuk itu.
-- Remote `upstream` dikunci untuk push, jadi merge terbalik ke produksi tidak
-  bisa terjadi karena kelalaian.
+- `FORK.md` -- how the two repos relate, the one-direction merge rule, and what
+  keeps it working.
+- `README.md` -- iPandu's identity on top, inherited documentation below it.
+- Its own version line starting at `v0.1.0`. iSmart-LA's tags were deliberately
+  not carried over, so `current_version()` can never report a production
+  version on the assistant's machine. No code change was needed for that.
+- The `upstream` remote is push-disabled, so a backwards merge into production
+  cannot happen by accident.
 
-Arah pengembangan: Telegram tetap satu-satunya antarmuka; email, WhatsApp dan
-kalender masuk sebagai **alat** lewat protokol penanda yang sudah ada, bukan
-sebagai GUI kedua. Kemampuan infrastruktur dipertahankan, tapi dengan pasangan
-kunci SSH sendiri -- VM berbeda saja tidak memisahkan risiko kalau kuncinya
-sama.
+Direction: Telegram stays the only interface; email, WhatsApp and calendar
+arrive as **tools** through the existing marker protocol, not as a second GUI.
+Infrastructure capability is kept, but with its own SSH keypair -- a separate VM
+does not separate the risk if the key is the same.
 
-Basis: 839 tes, 38 suite, semuanya lulus di titik fork.
+Baseline: 839 tests across 38 suites, all passing at the fork point.
 
 ## v0.2b.76 -- the whole class, not the three that fired
 

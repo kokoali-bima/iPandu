@@ -1,25 +1,31 @@
 # iPandu
 
-Asisten AI Infrasoft, dikendalikan lewat Telegram — dan tetap membawa kemampuan
-infrastruktur penuh dari [iSmart-LA](https://github.com/kokoali-bima/iSmart-LA).
+An AI assistant for Infrasoft, driven from Telegram — carrying the full
+infrastructure capability of
+[iSmart-LA](https://github.com/kokoali-bima/iSmart-LA) with it.
 
-*Pandu* = pemandu. Telegram tetap satu-satunya antarmuka; kanal lain (email,
-WhatsApp, kalender) dipakai sebagai **alat**, bukan sebagai GUI kedua.
+*Pandu* is Indonesian for **guide**. The `i` reads as Infrasoft, or as internet,
+depending on who is looking.
 
-> **Status: v0.1.0 -- eksperimental.** Ini repo tempat mencoba hal baru. Yang
-> dipakai produksi adalah iSmart-LA, bukan ini. Kalau Anda mencari agent yang
-> stabil untuk mengurus cluster, pakai repo itu.
+Telegram stays the only interface. Other channels — email, WhatsApp, calendar —
+are used as **tools**, not as a second GUI: the agent sends an email the same
+way it sends a file, through the marker protocol, with the same PIN gate on
+anything that leaves the building.
+
+> **Status: v0.1.0 — experimental.** This is where new things get tried. The
+> agent that runs production is iSmart-LA, not this one. If you want something
+> stable to look after a cluster, use that repo.
 >
-> Fork dari iSmart-LA v0.2b.76. Baca **[FORK.md](FORK.md)** sebelum mengubah
-> apa pun: ada satu aturan merge yang menentukan apakah perbaikan dari produksi
-> masih bisa ditarik ke sini, atau setiap bug harus diperbaiki dua kali.
+> Forked from iSmart-LA v0.2b.76. Read **[FORK.md](FORK.md)** before changing
+> anything: there is one merge rule that decides whether production fixes can
+> still be pulled in here, or whether every bug has to be fixed twice.
 
-Di bawah ini dokumentasi yang diwarisi dari iSmart-LA. Sebagian besar masih
-berlaku apa adanya — 79% kodenya memang sama.
+Everything below is inherited documentation from iSmart-LA. Most of it still
+applies as written — 79% of the code really is the same.
 
 ---
 
-## Warisan dari iSmart-LA (Lite Agent)
+## Inherited from iSmart-LA (Lite Agent)
 
 A lightweight Telegram bridge to **Claude Code** and **Antigravity CLI (agy)**, for
 infrastructure monitoring and investigation -- built to be dramatically cheaper to run

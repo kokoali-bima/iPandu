@@ -1,89 +1,103 @@
-# iPandu dan iSmart-LA — hubungan kedua repo
+# iPandu and iSmart-LA — how the two repos relate
 
-iPandu adalah **fork eksperimental** dari [iSmart-LA](https://github.com/kokoali-bima/iSmart-LA).
-Keduanya berbagi sekitar **79% kode** — plumbing Telegram, failover model, sesi,
-memori, media, Drive, penjadwalan, mekanisme update, dwibahasa, kontrol biaya.
+iPandu is an **experimental fork** of
+[iSmart-LA](https://github.com/kokoali-bima/iSmart-LA). The two share roughly
+**79% of the code**: Telegram plumbing, model failover, sessions, memory, media,
+Drive, scheduling, the update mechanism, bilingual replies, cost control.
 
-Titik fork: **v0.2b.76** (`95578c7`), 5 September 2026.
+Fork point: **v0.2b.76** (`95578c7`), 5 September 2026.
 
 | | iSmart-LA | iPandu |
 |---|---|---|
-| Peran | **produksi** — agent infrastruktur | **eksperimen** — asisten AI |
-| Kestabilan | dijaga ketat, rilis hati-hati | bebas dicoba, boleh rusak |
-| Kemampuan infra | ya | ya, tetap dipertahankan |
-| Deployment | VM produksi | VM terpisah |
-| Kunci SSH | kunci cluster | **pasangan kunci sendiri** |
+| Role | **production** — infrastructure agent | **experiment** — AI assistant |
+| Stability | guarded, released carefully | free to break |
+| Infra capability | yes | yes, deliberately kept |
+| Deployment | production VM | its own VM |
+| SSH keys | cluster key | **its own keypair** |
 
-## Aturan merge: SATU ARAH
+The split is not because the code differs. It is because the two have
+incompatible goals: iSmart-LA is being stabilised toward a production release,
+while this one needs to be experimented on. Those cannot share a repo without
+one of them losing.
+
+## Merge rule: ONE DIRECTION
 
 ```
-iSmart-LA (produksi)  ──merge──▶  iPandu (eksperimen)
-                      ◀── TIDAK PERNAH ───
+iSmart-LA (production)  ──merge──▶  iPandu (experiment)
+                        ◀── NEVER ───
 ```
 
-Perbaikan substrat dikerjakan **sekali** di iSmart-LA, lalu ditarik ke sini:
+Substrate fixes are made **once**, in iSmart-LA, and pulled in here:
 
 ```bash
 git fetch upstream
 git merge upstream/master
 ```
 
-Eksperimen iPandu tidak pernah mengalir balik otomatis. Kalau ada sesuatu di
-sini yang terbukti layak masuk produksi, angkat sebagai perubahan tersendiri di
-repo iSmart-LA — jangan di-merge terbalik.
+Nothing flows back automatically. If something proven here belongs in
+production, raise it as its own change in the iSmart-LA repo — never by merging
+backwards.
 
-Remote `upstream` sudah **dikunci untuk push**:
+The `upstream` remote is **push-disabled** on purpose:
 
 ```
-upstream  https://github.com/kokoali-bima/iSmart-LA.git (fetch)
-upstream  DISABLED-push-ke-produksi-dilarang           (push)
+upstream  https://github.com/kokoali-bima/iSmart-LA.git  (fetch)
+upstream  DISABLED-push-to-production-forbidden          (push)
 ```
 
-Kalau suatu saat terlihat URL push yang normal di situ, itu bukan kemudahan —
-itu pengaman yang hilang.
+If a normal push URL ever appears there, that is not a convenience someone
+added. It is a safety rail someone removed.
 
-## Disiplin yang membuat ini bertahan
+## The discipline that keeps this working
 
-**Tambah berkas. Jangan restrukturisasi `lite_agent.py`.**
+**Add files. Do not restructure `lite_agent.py`.**
 
-Ini satu-satunya aturan yang menentukan skema ini hidup atau mati. Selama
-bentuk 79% substrat itu tetap, `git merge upstream/master` mulus. Begitu iPandu
-mengaduk-aduk isi file yang sama, setiap merge jadi pertempuran dan dalam
-sebulan orang berhenti melakukannya — lalu kedua repo diam-diam berpisah, dan
-setiap bug substrat harus diperbaiki dua kali.
+This is the one rule that decides whether the scheme survives. While the shape
+of that shared 79% holds, `git merge upstream/master` stays clean. Once iPandu
+starts rearranging the same file, every merge becomes a fight, and within a
+month people stop doing them — at which point the repos have quietly separated
+and every substrate bug has to be fixed twice.
 
-Untuk gambarannya: dalam **dua hari** pada 4–5 September, sepuluh bug yang
-sampai ke produksi ditemukan dan diperbaiki di substrat bersama ini. Kalau
-merge sudah rusak saat itu, semuanya harus dikerjakan dua kali.
+For scale: in **two days**, 4–5 September, ten bugs that had reached production
+were found and fixed in this shared substrate. If merges had already been
+broken, all ten would have been fixed twice.
 
-Praktiknya:
+In practice:
 
-- Kemampuan baru (email, WhatsApp, kalender) → **berkas baru**, disambungkan
-  lewat protokol penanda yang sudah ada, bukan dengan membedah fungsi lama.
-- Perlu mengubah `lite_agent.py`? Pertimbangkan dulu apakah perubahan itu
-  sebenarnya milik iSmart-LA. Kalau ya, kerjakan di sana dan tarik ke sini.
-- Kalau tetap harus diubah di sini, buat sekecil mungkin dan satu tempat, bukan
-  tersebar.
+- New capabilities (email, WhatsApp, calendar) go in **new files**, wired in
+  through the existing marker protocol rather than by opening up old functions.
+- Need to change `lite_agent.py`? First ask whether the change actually belongs
+  to iSmart-LA. If it does, make it there and pull it in.
+- If it genuinely belongs here, keep it small and in one place rather than
+  spread across the file.
 
-## Versi
+## Versioning
 
-iPandu punya garis versi sendiri, mulai `v0.1.0`. Tag iSmart-LA sengaja tidak
-dibawa supaya `current_version()` (yang membaca `git describe --tags`) tidak
-pernah salah melaporkan versi produksi di mesin asisten. Riwayat 114 commit
-tetap utuh, jadi provenance-nya tidak hilang.
+iPandu has its own version line, starting at `v0.1.0`. iSmart-LA's tags were
+deliberately **not** carried over, so `current_version()` — which reads
+`git describe --tags` — can never report a production version on the assistant's
+machine. No code change was needed for that. The 114 commits of history are
+intact, so provenance is not lost.
 
-## Keamanan: kenapa kunci SSH-nya harus terpisah
+## Why the SSH keys must be separate
 
-iPandu tetap punya kemampuan infrastruktur — itu memang tujuannya. Tapi VM yang
-berbeda **belum** memisahkan risiko kalau kuncinya sama: agent eksperimental
-yang memegang kunci cluster tetap punya akses produksi penuh.
+iPandu keeps its infrastructure capability — that is the point of it. But a
+different VM does **not** separate the risk if the key is the same: an
+experimental agent holding the cluster key still has full production access.
 
-Jadi iPandu didaftarkan dengan **pasangan kunci sendiri**, hanya di server yang
-memang boleh ia sentuh. Mekanismenya sudah ada: `/addserver` membuat kunci
-sendiri dan hanya menampilkan public key-nya untuk dipasang.
+So iPandu is registered with **its own keypair**, on only the servers it is
+meant to touch. The mechanism already exists: `/addserver` generates its own key
+and only ever shows the public half for installation.
 
-Satu hal lagi yang berlaku khusus di sini. Begitu iPandu bisa membaca email,
-untuk pertama kalinya ada input yang **bisa ditulis oleh penyerang** — siapa pun
-bisa mengirim email. Isi email harus diperlakukan sebagai data, bukan
-instruksi: penanda apa pun di dalamnya diabaikan, tidak ada `LEARN:`, dan
-terutama tidak ada `NEEDS_WRITE:` yang boleh lahir dari isi email.
+One more thing applies here and not in production. The moment iPandu can read
+email, there is for the first time an input an **attacker can write** — anyone
+can send an email. Email content must be treated as data, never as
+instructions: markers inside it are ignored, no `LEARN:` lines are honoured,
+and above all no `NEEDS_WRITE:` may originate from the body of an email.
+
+## Language
+
+Repository documentation, code comments and commit messages are in **English**,
+the same as iSmart-LA. What the bot says **in Telegram stays bilingual**
+(English and Indonesian) — that is a product behaviour, not a repo convention,
+and it does not change here.
