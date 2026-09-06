@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.2b.84 -- CI had been red for three releases and nobody looked
+
+Every release note here has ended with a green figure. Those runs were real, but
+they were **one machine on one Python version**. GitHub Actions runs 3.10, 3.11,
+3.12 and 3.13, and it had been failing since v0.2b.81. Nothing checked it,
+including the person reporting the numbers.
+
+Two separate faults, both in the tests rather than the product, and both worse
+than they look.
+
+**`test_py_compat.py` was SKIPped on 3.10 and 3.11 -- the only two versions it
+exists to protect.** It guards against a backslash inside an f-string
+expression, which is a `SyntaxError` before Python 3.12. To prove its detector
+works it parses a deliberately bad snippet; on 3.10 and 3.11 `ast.parse` refuses
+that snippet outright, the suite crashed, and `run_all` reported it as a skip.
+So the check was silently absent exactly where the bug bites, and present only
+where it cannot happen.
+
+A refusal from the interpreter is the same finding as a hit from the AST walk,
+so it now counts as one. And because that branch only fires below 3.12, there is
+a case that reaches it on every version -- source no Python can parse -- since an
+unexercised branch is how this got missed in the first place.
+
+**`test_release_consistency.py` failed on all four versions.** `actions/checkout`
+defaults to a depth-1 clone with no tags, and that suite asks git whether the
+release it is looking at has one. It reported "release notes committed with no
+tag" on every push. The workflow now checks out with `fetch-depth: 0`, so CI
+verifies the real thing instead of failing on its own checkout.
+
+The lesson is the one this project keeps relearning: a gate that is red for a
+reason unrelated to the code is a gate people stop reading. It had been red long
+enough to stop being information.
+
+931/931 across 41 suites locally; CI is the number that now has to agree.
+
 ## v0.2b.83 -- "it must be bilingual" stops depending on anyone remembering
 
 The operator has had to say this more than once. That is the signal that it

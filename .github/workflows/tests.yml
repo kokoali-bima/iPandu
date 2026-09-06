@@ -26,6 +26,14 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history AND tags. The default is a depth-1 checkout with no
+          # tags, and test_release_consistency.py asks git whether the release
+          # it is looking at has one -- so it reported "release notes committed
+          # with no tag" on every push and CI was red for three releases while
+          # the same suite passed locally. A gate that is red for a reason
+          # unrelated to the code is a gate people stop reading.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
