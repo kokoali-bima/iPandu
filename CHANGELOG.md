@@ -52,6 +52,15 @@ Linux user and could curl the key directly, exactly as it could use
 `~/.ssh/agent_write` directly today. The wrapper marks intent, stops accidents,
 keeps a log, and guarantees the rollback point.
 
+One bug from the first cut of this, kept here because the test lesson is worth
+more than the fix: `base_url` was cleaned with `tr -d '\r\n/'`, meaning to drop
+a trailing slash. `tr -d` deletes *every* match, so `https://host:1945` became
+`https:host:1945` — curl produced nothing at all under `-s`, and the host
+extraction cut at the first colon and tried to route to "https". The test
+passed anyway, because it asserted the log contained `host:1945/api/...`, which
+a mangled scheme still satisfies. It now asserts the whole URL, and there are
+cases for a trailing slash and for a `base_url` with no scheme at all.
+
 The brief the model receives is now built by `capabilities_brief()`, which adds
 the OPNsense section only where the credentials actually exist. A deployment
 without them is not told about a tool it cannot use -- otherwise the model

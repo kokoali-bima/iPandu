@@ -121,13 +121,31 @@ root, conf, base, binp = make_env(until=None)          # write mode CLOSED
 r = run(root, conf, base, binp, "/api/core/firmware/status")
 check("a plain read works with write mode closed", r.returncode == 0)
 check("...and it actually reached curl", (root / "curl.log").exists())
-check("...against the configured base URL and path",
-      "10.0.0.1:1945/api/core/firmware/status" in (root / "curl.log").read_text())
+# The WHOLE url, scheme included. Asserting only "host:port/path" is what let a
+# real bug through: base_url was cleaned with `tr -d '\r\n/'`, which deletes
+# every slash rather than a trailing one, so https://host:1945 became
+# https:host:1945 -- still containing "host:1945/api/..." and still passing,
+# while curl silently produced nothing under -s.
+check("...against the configured base URL and path, scheme intact",
+      "https://10.0.0.1:1945/api/core/firmware/status" in (root / "curl.log").read_text())
 check("...with no config backup taken, since nothing is being changed",
       not (base / "opnsense-backups").exists())
 
 r = run(root, conf, base, binp, "/api/x", "-X", "GET")
 check("an explicit -X GET is still a read, not a write", r.returncode == 0)
+
+# Only ONE trailing slash is stripped, and only from the end.
+root, conf, base, binp = make_env(until=None)
+(conf / "base_url").write_text("https://10.0.0.1:1945/\n")
+run(root, conf, base, binp, "/api/core/firmware/status")
+check("a trailing slash in base_url is stripped without mangling the scheme",
+      "https://10.0.0.1:1945/api/core/firmware/status" in (root / "curl.log").read_text())
+
+root, conf, base, binp = make_env(until=None)
+(conf / "base_url").write_text("172.16.10.20:1945\n")
+r = run(root, conf, base, binp, "/api/core/firmware/status")
+check("a base_url with no scheme is refused rather than quietly failing in curl",
+      r.returncode != 0 and "http" in (r.stdout + r.stderr))
 
 # --- 2. writes are refused while write mode is closed ----------------------
 for args, why in (
