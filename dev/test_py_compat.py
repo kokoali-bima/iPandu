@@ -57,18 +57,47 @@ def backslash_in_fstring_exprs(source: str, filename: str) -> list[str]:
     return hits
 
 
+def find_hits(source: str, filename: str) -> list[str]:
+    """The detector, plus the case the detector cannot reach.
+
+    On 3.10 and 3.11 the offending code is not merely detectable -- it is
+    unparseable, so `ast.parse` raises before the walk ever starts. This suite
+    used to crash there and be reported as SKIPped, which meant the check was
+    silently absent on **exactly the two versions it exists to protect**. CI was
+    red for three releases with that skip in it.
+
+    A SyntaxError from the interpreter is the same finding as a hit from the
+    walk, so it counts as one.
+    """
+    try:
+        return backslash_in_fstring_exprs(source, filename)
+    except SyntaxError as exc:
+        return [f"{filename}: refused by this interpreter -- {exc.msg}"]
+
+
 # --- 1. the detector itself must actually detect ---------------------------
 BAD = '''x = f"{'\\u2705 ' if a == b else ''}{a}"'''
 GOOD = '''tick = "\\u2705 "\nx = f"{tick if a == b else ''}{a}"'''
 LITERAL_ONLY = '''x = f"line\\n{a}"'''   # backslash in the LITERAL half: fine
 
-check("detector flags a backslash inside an f-string expression (THE bug)",
-      len(backslash_in_fstring_exprs(BAD, "<bad>")) == 1)
+check(f"detector flags a backslash inside an f-string expression (THE bug) "
+      f"on Python {sys.version_info.major}.{sys.version_info.minor}",
+      len(find_hits(BAD, "<bad>")) == 1)
 check("detector passes the fixed form (literal bound to a name first)",
-      backslash_in_fstring_exprs(GOOD, "<good>") == [])
+      find_hits(GOOD, "<good>") == [])
 check("detector does NOT false-positive on a backslash in the literal part "
       "(only the expression half is restricted before 3.12)",
-      backslash_in_fstring_exprs(LITERAL_ONLY, "<lit>") == [])
+      find_hits(LITERAL_ONLY, "<lit>") == [])
+
+# The SyntaxError branch is the one that only fires on 3.10 and 3.11, so on a
+# newer interpreter it would otherwise never be exercised -- and an unexercised
+# branch is how this suite came to be SKIPped on those versions in the first
+# place. Source that no Python version can parse reaches it everywhere.
+UNPARSEABLE = "x = ("
+check("source the interpreter refuses is reported as a finding, not a crash",
+      len(find_hits(UNPARSEABLE, "<broken>")) == 1)
+check("...and the reason says the interpreter refused it",
+      "refused by this interpreter" in find_hits(UNPARSEABLE, "<broken>")[0])
 
 # --- 2. the real sources must be clean -------------------------------------
 targets = [SRC] + sorted((ROOT / "tools").glob("*.py"))
@@ -76,7 +105,7 @@ all_hits = []
 for f in targets:
     if not f.exists():
         continue
-    all_hits += backslash_in_fstring_exprs(f.read_text(encoding="utf-8"), f.name)
+    all_hits += find_hits(f.read_text(encoding="utf-8"), f.name)
 
 check(f"no backslash-in-f-string-expression anywhere in {len(targets)} source file(s) "
       f"-- would break every Python below 3.12",
