@@ -1968,6 +1968,73 @@ def bootstrap_key_with_password(host: str, user: str, port: int,
     return True, detail
 
 
+def password_auth_state(host: str, user: str, port: int) -> Optional[bool]:
+    """Is password login still accepted on this host? None when we cannot tell.
+
+    Asked of sshd itself (`sshd -T`), not of the config file. On every Ubuntu
+    and Proxmox host in this fleet `/etc/ssh/sshd_config` carries an `Include`
+    near the top, and the file that actually decides lives in
+    `sshd_config.d/` -- one host here has `#PasswordAuthentication yes`
+    commented out in the main file while a drop-in sets it to `no`. Reading the
+    main file would have reported the opposite of the truth.
+    """
+    try:
+        proc = subprocess.run(
+            ["ssh", "-i", str(SSH_RW_KEY), "-p", str(port),
+             "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+             "-o", "ConnectTimeout=15", f"{user}@{host}", "sshd -T"],
+            capture_output=True, text=True, timeout=40)
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    for line in (proc.stdout or "").splitlines():
+        if line.lower().startswith("passwordauthentication"):
+            return line.split()[-1].strip().lower() == "yes"
+    return None
+
+
+def harden_ssh_advice(lang: str) -> str:
+    """The exact commands to make a host key-only, for the operator to run.
+
+    Deliberately advice and not an action. Turning off password login is the
+    one change here that locks you out permanently when it goes wrong, so it
+    stays in the hands of whoever can walk to the console.
+
+    The filename matters and is not arbitrary. sshd takes the FIRST value it
+    sees, and `Include /etc/ssh/sshd_config.d/*.conf` sits near the top of the
+    main file -- verified on this fleet, and verified in both directions: with
+    00=no/99=yes the effective value was `no`, and with the values swapped it
+    was `yes`. So a drop-in must sort BEFORE any cloud-image file to win. The
+    `sed -i` recipe that circulates for this edits the main file and is quietly
+    overridden by `60-cloudimg-settings.conf` on exactly the images used here.
+    """
+    return _t(lang,
+        "\n\n🔐 <b>This host still accepts password logins.</b>\n"
+        "Now that my key works, you can close that off. Run on the host:\n"
+        "<pre>printf 'PasswordAuthentication no\\nKbdInteractiveAuthentication no\\n' \\\n"
+        "  > /etc/ssh/sshd_config.d/00-ismart-hardening.conf\n"
+        "sshd -t &amp;&amp; systemctl reload ssh || systemctl reload sshd\n"
+        "sshd -T | grep -i passwordauth</pre>\n"
+        "<i>Keep this SSH session open until that last line prints "
+        "<code>no</code> — reload does not drop existing sessions, so an open "
+        "one is your way back if anything is wrong. The filename starts with "
+        "00 on purpose: sshd takes the first value it reads, and a cloud-image "
+        "drop-in would otherwise win.</i>",
+
+        "\n\n🔐 <b>Host ini masih menerima login password.</b>\n"
+        "Sekarang kunci saya sudah jalan, itu bisa ditutup. Jalankan di host:\n"
+        "<pre>printf 'PasswordAuthentication no\\nKbdInteractiveAuthentication no\\n' \\\n"
+        "  > /etc/ssh/sshd_config.d/00-ismart-hardening.conf\n"
+        "sshd -t &amp;&amp; systemctl reload ssh || systemctl reload sshd\n"
+        "sshd -T | grep -i passwordauth</pre>\n"
+        "<i>Biarkan sesi SSH ini tetap terbuka sampai baris terakhir mencetak "
+        "<code>no</code> — reload tidak memutus sesi yang sudah jalan, jadi "
+        "sesi terbuka itu jalan pulang Anda kalau ada yang salah. Nama "
+        "berkasnya diawali 00 dengan sengaja: sshd memakai nilai pertama yang "
+        "dibacanya, dan drop-in bawaan cloud image akan menang kalau tidak.</i>")
+
+
 def secure_server(host: str, user: str, port: int) -> tuple[bool, str]:
     """Install the guard and prove it refuses a write. Nothing is retired here.
 
@@ -9704,6 +9771,17 @@ async def _finish_addserver(update: Update, query, discovery: str = "") -> None:
         "\nSudah ada di <code>~/.ssh/config</code> dan tercatat di brief agent, "
         "jadi bisa dijangkau mulai pesan berikutnya.\n\n/servers untuk melihat lagi.",
     )
+    # Only when it is actually still open. Advice that arrives on a host that
+    # is already key-only is noise, and noise is what teaches people to skip
+    # the paragraph that matters. Asked of sshd itself, over the key that was
+    # just proven to work.
+    try:
+        still_open = await asyncio.get_running_loop().run_in_executor(
+            None, password_auth_state, data["host"], data["user"], int(data["port"]))
+    except Exception:
+        still_open = None
+    if still_open:
+        msg += harden_ssh_advice(lang)
     await query.edit_message_text(msg, parse_mode="HTML")
 
 

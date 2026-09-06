@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.2b.82 -- how to close off password logins, without doing it for you
+
+Turning off password authentication is the one change in this whole area that
+locks you out permanently when it goes wrong. So the bot does not do it. It
+hands over the exact commands, once the host is registered and its own key is
+proven -- and only when that host actually still accepts passwords.
+
+Checked by asking **sshd itself** (`sshd -T`), not by reading the config file,
+because on these machines the file lies. Every Ubuntu and Proxmox host in this
+fleet has `Include /etc/ssh/sshd_config.d/*.conf` near the top of
+`/etc/ssh/sshd_config`, and the drop-in is what decides. One host here has
+`#PasswordAuthentication yes` commented out in the main file while
+`60-cloudimg-settings.conf` sets it to `no`. Reading the main file would have
+reported the opposite of the truth. Measured across the fleet: one Proxmox node
+still open, another already closed -- so blanket advice would have been wrong
+half the time.
+
+The advice is a **drop-in**, not the `sed -i` recipe that circulates for this:
+
+    printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' \
+      > /etc/ssh/sshd_config.d/00-ismart-hardening.conf
+    sshd -t && systemctl reload ssh || systemctl reload sshd
+    sshd -T | grep -i passwordauth
+
+The `00-` prefix is not decoration. sshd takes the **first** value it reads, and
+the Include sits above everything else -- verified in both directions on a
+throwaway config: with `00=no, 99=yes` the effective value was `no`, and with
+the two swapped it was `yes`. A drop-in that sorts after the cloud-image file
+would be silently ignored, and so would editing the main file. That is precisely
+how someone ends up believing a host is hardened when it is not.
+
+The rest of the wording earns its place too: `sshd -t` before reloading so a
+typo cannot lock anyone out, `reload` rather than `restart` so live sessions
+survive, `sshd -T` afterwards so the operator verifies instead of trusting, and
+a note to keep the current session open until that line prints `no` -- it is the
+way back if anything is wrong.
+
+926/926 across 40 suites.
+
 ## v0.2b.81 -- the bot can put its own key on a new machine
 
 The last manual step in `/addserver` was the one people put off: leave Telegram,
