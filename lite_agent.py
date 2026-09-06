@@ -1483,8 +1483,35 @@ def install_node_guard(host: str, user: str, port: int) -> tuple[bool, str]:
         "ISMART_GUARD_EOF",
         f"install -m 755 /tmp/.pve-ro-guard.new {NODE_GUARD_REMOTE}",
         "rm -f /tmp/.pve-ro-guard.new",
-        f"grep -qF '{fingerprint_bit}' ~/.ssh/authorized_keys || "
-        f"printf '%s\\n' '{ro_line}' >> ~/.ssh/authorized_keys",
+        # Keep the pre-iSmart file once, and only once: re-running must not
+        # overwrite the backup with a copy of our own work.
+        "[ -e ~/.ssh/authorized_keys.ismart-bak ] || "
+        "cp ~/.ssh/authorized_keys ~/.ssh/authorized_keys.ismart-bak",
+        # This used to ask only whether the key was PRESENT, and skip when it
+        # was. On any host where the operator had already pasted
+        # agent_readonly.pub by hand, that skipped silently -- leaving a line
+        # with the same key and NO command=, which authorises precisely the
+        # unrestricted access the guard exists to prevent. install_node_guard
+        # then reported success and only verify_node_guard() caught it. That
+        # happened for real on a UIN host, and would have happened on every
+        # machine prepared by hand before being registered.
+        #
+        # So drop EVERY line carrying this key material, then write the guarded
+        # one. grep -vF rather than sed: base64 can contain '/', and there is no
+        # sed delimiter that is safe for all possible key blobs. Rewriting
+        # unconditionally is still idempotent in content -- a second run lands
+        # the same file -- and it heals a hand-pasted key instead of trusting it.
+        "grep -vF '" + fingerprint_bit + "' ~/.ssh/authorized_keys "
+        "> /tmp/.ismart_ak.new || true",
+        f"printf '%s\\n' '{ro_line}' >> /tmp/.ismart_ak.new",
+        # Never install an empty authorized_keys. It cannot be empty here (the
+        # line above just appended), but this is the file that decides whether
+        # anyone can still log in, so the guarantee is stated rather than
+        # inferred -- `set -e` aborts before the overwrite if it ever fails.
+        "test -s /tmp/.ismart_ak.new",
+        # cat, not mv: preserves the file's existing owner and mode.
+        "cat /tmp/.ismart_ak.new > ~/.ssh/authorized_keys",
+        "rm -f /tmp/.ismart_ak.new",
         # Bootstrapping off the legacy key? Authorise the write key too, so the
         # next run has a proper admin key and the legacy one can be retired.
         (f"grep -qF '{rw_pub.split()[1][:40]}' ~/.ssh/authorized_keys || "

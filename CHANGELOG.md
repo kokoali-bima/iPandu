@@ -18,6 +18,57 @@
      that gap, but that is the maintainer's call, not something a contributing
      branch should decide by editing a check written one release ago. -->
 
+## Unreleased -- the read-only guard replaces a hand-installed key
+
+`/addserver` against a UIN host at `172.16.10.76` reported:
+
+    verification failed: the read-only key can still WRITE -- the guard is
+    not in force. This node is unprotected.
+
+That host's `authorized_keys` held the agent's read-only key, pasted there by
+hand while the machine was being prepared:
+
+    ssh-ed25519 AAAA...KPw7j68... ismart-la-readonly
+
+No `command=`. `install_node_guard()` asked only whether the key was PRESENT,
+found it, and skipped adding the guarded line -- then reported success. The
+node was left authorising the read-only key as ordinary unrestricted root:
+precisely the configuration the guard exists to prevent, reached by a road
+nobody had walked.
+
+`verify_node_guard()` caught it, which is why nothing was lost and why that
+function is not belt-and-braces. But the operator could not finish
+`/addserver`, and every machine prepared by hand before registration was
+queued up to fail the same way -- two Bimajaya application VMs among them.
+
+So the check now asks the right question: is there a line carrying this key
+AND the guard options? If not, every line carrying that key is dropped and the
+guarded one written in its place. `grep -vF`, not `sed`: base64 can contain
+`/`, and no sed delimiter is safe for every possible key blob. Rewriting
+unconditionally is still idempotent in content -- a second run lands the same
+file, which is what makes `/secure` safe to re-run -- and it heals a
+hand-pasted key rather than trusting it. The pre-iSmart file is copied to
+`authorized_keys.ismart-bak` once and never overwritten afterwards, and
+`test -s` refuses to install an empty authorized_keys before the overwrite,
+because this is the file that decides whether anyone can still log in.
+
+`dev/test_node_guard.py` gains a section that RUNS the generated script against
+a real fixture instead of matching its text: a hand-prepared host carrying the
+unrestricted key, an unrelated admin key, and the write key. It asserts that no
+*unguarded* line survives -- stated that way on purpose, because the fixture
+starts with exactly one such line, so a count-based check passes when the
+script does nothing at all, which is the failure being tested for. The old
+presence-only check is executed too and asserted to leave the host open, so the
+fix cannot be quietly simplified back later.
+
+Two things that suite got wrong, found while writing that: it set `HOME` but
+not `USERPROFILE`, and `Path.home()` reads the latter on Windows -- so it
+generated real keypairs into the developer's own `~/.ssh`, then failed on the
+next run because its own litter was still sitting there. And its mock answered
+the install call but not `_admin_key_for()`'s probe, so `install_node_guard()`
+returned early, the captured script was `""`, and running an empty script
+looked exactly like a broken guard.
+
 ## Unreleased -- newagent.sh: another deployment, in one command
 
 The last piece of the split this series is about. `install.sh` sets up ONE
