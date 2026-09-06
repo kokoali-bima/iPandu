@@ -1359,6 +1359,97 @@ def unregistered_hosts_in(text: str) -> list[str]:
     return out
 
 
+# A credential being TYPED, not the word being discussed. "cek password expiry
+# policy" must not fire; "user root password Hunter2" must. So the pattern needs
+# an assignment AND something assigned -- a bare mention is a conversation, and a
+# warning that interrupts conversations is one people learn to ignore.
+#
+# Checked in code, before the model runs: zero tokens, every time, and it cannot
+# be talked out of firing the way an instruction in a brief can.
+# The trailing \b matters. Without it the engine backtracks on "reset password?"
+# -- matching just "pass", then reading "word?" as the secret. Longest keyword
+# first, a boundary after it, and a required space before the value, so
+# "passwordnya apa ya" is a question and not a disclosure.
+_PASSWORD_RE = re.compile(
+    r"\b(?:password|passwd|pwd|pass|kata\s*sandi|sandi)\b"
+    r"\s*(?:adalah|is)?\s*[:=]?\s+"
+    r"(?P<secret>\S{3,})",
+    re.I)
+# Words that follow "password" in a QUESTION rather than a disclosure.
+_PASSWORD_INNOCENT = {
+    "expiry", "policy", "policies", "rotation", "auth", "authentication",
+    "login", "less", "manager", "hash", "hashing", "reset", "expired",
+    "kebijakan", "kadaluarsa", "kedaluwarsa", "masuk", "baru", "lama",
+    "?", "nya", "itu", "apa", "gimana", "bagaimana",
+}
+
+
+def mentions_password(text: str) -> Optional[str]:
+    """The literal that looks like a credential, or None.
+
+    Returns the matched secret only so the caller can measure it -- it is never
+    logged, never stored and never echoed back.
+    """
+    m = _PASSWORD_RE.search(text or "")
+    if not m:
+        return None
+    secret = m.group("secret").strip().strip(".,;:!?")
+    if not secret or secret.lower() in _PASSWORD_INNOCENT:
+        return None
+    # "password:" with nothing after it is someone about to type one, or a
+    # heading in a pasted form. Either way there is nothing to leak yet.
+    if secret.startswith(("http://", "https://")):
+        return None
+    return secret
+
+
+def scrub_password(text: str) -> str:
+    """The same message with the credential replaced.
+
+    Needed because the text does not stop at the warning: it is kept for the
+    "just answer" button and would otherwise be handed to a model with the
+    password still in it -- deleting the chat message while forwarding its
+    contents upstream would be worse than doing nothing, because it would look
+    solved.
+    """
+    def _mask(m):
+        return m.group(0).replace(m.group("secret"), "[dihapus]")
+    return _PASSWORD_RE.sub(_mask, text or "")
+
+
+async def warn_password_in_chat(update: Update, deleted: bool) -> None:
+    """Say why that was a bad idea, and what happens instead.
+
+    Deliberately not a scolding. The operator did the natural thing -- they were
+    handing over what the machine needs -- and the reason it is wrong is not
+    obvious unless someone says it once, plainly.
+    """
+    lang = _chat_lang(update)
+    gone = _t(lang,
+              "I deleted your message.",
+              "Pesan Anda sudah saya hapus.") if deleted else _t(lang,
+              "I could not delete your message — please delete it yourself.",
+              "Pesan Anda tidak bisa saya hapus — tolong hapus sendiri.")
+    await _msg(update).reply_text(
+        _t(lang,
+           f"⚠️ <b>That looked like a password.</b> {gone}\n\n"
+           "A password typed here is stored in this chat's history, on your "
+           "device, on mine, and on Telegram's servers. Deleting it does not "
+           "undo that it was sent. Treat it as exposed and change it.\n\n"
+           "<b>You never need to send me one.</b> When a machine needs "
+           "credentials I ask for them in a wizard, on a keypad, where nothing "
+           "becomes a chat message.",
+           f"⚠️ <b>Itu tadi terlihat seperti password.</b> {gone}\n\n"
+           "Password yang diketik di sini tersimpan di riwayat chat ini, di HP "
+           "Anda, di sisi saya, dan di server Telegram. Menghapusnya tidak "
+           "membatalkan fakta bahwa ia sempat terkirim. Anggap sudah bocor, "
+           "dan ganti.\n\n"
+           "<b>Anda tidak pernah perlu mengirimkannya ke saya.</b> Kalau sebuah "
+           "mesin butuh kredensial, saya yang akan meminta lewat wizard, di "
+           "keypad, sehingga tidak ada yang jadi pesan chat."),
+        parse_mode="HTML")
+
+
 def parse_host_hints(text: str) -> dict:
     """Port and user, when the operator already said them.
 
@@ -10001,10 +10092,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if (msg is not None and (msg.text or "")
             and update.effective_chat.id not in _server_wizard
             and (_is_owner(update) or await _is_group_admin(update, context))):
-        unknown = unregistered_hosts_in(msg.text)
+        # A credential typed into the chat is handled FIRST, and in code rather
+        # than by asking a model to notice -- it costs no tokens, it happens on
+        # every message, and unlike an instruction in a brief it cannot be
+        # talked out of firing.
+        if mentions_password(msg.text):
+            deleted = False
+            try:
+                await msg.delete()
+                deleted = True
+            except Exception:
+                # Bots cannot always delete someone else's message. Say so
+                # rather than implying it is gone when it is not.
+                logger.warning("could not delete a message containing a credential")
+            await warn_password_in_chat(update, deleted)
+
+        # From here on, work with the SCRUBBED text: the credential must not
+        # reach _pending_newhost, the model, or anything downstream.
+        safe_text = scrub_password(msg.text)
+        unknown = unregistered_hosts_in(safe_text)
         if unknown:
             await offer_register_host(update, context, unknown[0],
-                                      parse_host_hints(msg.text), msg.text)
+                                      parse_host_hints(safe_text), safe_text)
+            return
+        if mentions_password(msg.text):
+            # Warned, nothing else to register: do not hand the credential to a
+            # model as well.
             return
 
     # An attached image, saved somewhere the model can open. A screenshot with

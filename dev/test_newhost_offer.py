@@ -204,6 +204,51 @@ check("the offer runs BEFORE the model, so an impossible turn is never paid for"
       src.index("offer_register_host(update, context") < src.index("await run_combo")
       if "await run_combo" in src else True)
 
+# --- credentials typed into the chat --------------------------------------
+# Detected in code, before the model runs: zero tokens, fires on every message,
+# and unlike an instruction in a brief it cannot be talked out of firing.
+LEAKS = [
+    "user root password Hunter2!",
+    "ip 192.0.2.10 port ssh 222 user root, password: Rahasia123",
+    "sandi: Bscloud*234",
+    "root pwd = s3cr3t-value",
+]
+INNOCENT = [
+    "cek password expiry policy",
+    "gimana cara reset password?",
+    "passwordnya apa ya",
+    "password manager mana yang bagus",
+    "tolong audit kebijakan password di server",
+]
+for t in LEAKS:
+    check(f"a credential is caught: {t[:34]}", mod.mentions_password(t) is not None)
+for t in INNOCENT:
+    check(f"a question about passwords is NOT flagged: {t[:32]}",
+          mod.mentions_password(t) is None)
+
+# The message does not stop at the warning -- it is kept for "just answer" and
+# would otherwise carry the password to a model. Deleting the chat message while
+# forwarding its contents upstream would look solved and not be.
+leak = "perbaiki 192.0.2.10 user root password Rahasia123"
+scrubbed = mod.scrub_password(leak)
+check("the secret is removed before the text goes anywhere else",
+      "Rahasia123" not in scrubbed)
+check("...while the rest of the request survives",
+      "192.0.2.10" in scrubbed and "root" in scrubbed)
+check("a clean message is left untouched",
+      mod.scrub_password("perbaiki 192.0.2.10") == "perbaiki 192.0.2.10")
+check("the host offer still works on the scrubbed text",
+      mod.unregistered_hosts_in(scrubbed) == ["192.0.2.10"])
+
+src2 = Path(SRC).read_text(encoding="utf-8")
+check("the warning says the password should be treated as exposed",
+      "exposed" in src2 and "bocor" in src2)
+check("the warning tells them they never need to send one",
+      "never need to send" in src2 and "tidak pernah perlu" in src2)
+check("downstream uses the scrubbed text, not the raw message",
+      "safe_text = scrub_password(msg.text)" in src2
+      and "unregistered_hosts_in(safe_text)" in src2)
+
 failed = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed")
 if failed:

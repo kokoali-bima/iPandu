@@ -105,7 +105,17 @@ if not suites:
     print("no test_*.py found in dev/")
     sys.exit(2)
 
+# The LAST tally in the output, not the first. A suite that grew a second
+# summary block -- easy to do when tests are appended after an existing one --
+# reported only the checks above the first one, and the 16 below it were
+# silently uncounted. Taking the final tally is also simply what "the result"
+# means: any earlier line is a partial.
 RESULT_RE = re.compile(r"^(\d+)/(\d+) passed", re.MULTILINE)
+
+
+def _final_tally(text: str):
+    hits = list(RESULT_RE.finditer(text or ""))
+    return hits[-1] if hits else None
 
 passed = failed = skipped = 0
 failing: list[str] = []
@@ -116,7 +126,7 @@ for suite in suites:
     proc = subprocess.run([sys.executable, str(suite), str(SRC)],
                           capture_output=True, text=True, cwd=str(ROOT))
     out = proc.stdout + proc.stderr
-    m = RESULT_RE.search(out)
+    m = _final_tally(out)
 
     if m:
         got, total = int(m.group(1)), int(m.group(2))

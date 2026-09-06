@@ -73,6 +73,15 @@ readme = (REPO / "README.md").read_text(encoding="utf-8")
 declared = changelog_version(changelog)
 shown = readme_version(readme)
 
+# Committed while still holding merge conflict markers. This happened for real
+# in the iPandu fork: a resolution script died on a Windows encoding error
+# before it wrote the file, and the `git add -A && git commit` that followed ran
+# anyway. Nothing caught it -- the version check below still parsed fine, with
+# `<<<<<<< HEAD` sitting directly above the heading it was reading.
+for doc, body in (("CHANGELOG.md", changelog), ("README.md", readme)):
+    markers = [mk for mk in ("<<<<<<< ", ">>>>>>> ") if mk in body]
+    check(f"{doc} carries no unresolved merge conflict", not markers)
+
 check("CHANGELOG.md has a parseable version heading", bool(declared))
 check("README.md has a parseable status version", bool(shown))
 check(f"README and CHANGELOG agree (README={shown or '?'}, "
