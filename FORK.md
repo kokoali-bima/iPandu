@@ -138,3 +138,27 @@ git merge upstream/master        # expect CHANGELOG.md to conflict
 git add CHANGELOG.md && git commit
 python3 dev/run_all.py lite_agent.py    # must still be green
 ```
+
+## Two more things the merges taught
+
+**`git fetch upstream` brings upstream's tags.** The second merge pulled in 83
+of iSmart-LA's tags, which quietly undid the whole reason they were dropped at
+fork time: `current_version()` reads `git describe --tags`, so the assistant
+would have started reporting a production version on its own machine. The
+release gate caught it; nobody would have caught it by eye.
+
+Fixed permanently:
+
+```bash
+git config remote.upstream.tagOpt --no-tags
+```
+
+A fetch cannot bring them back now. If `git tag` here ever lists something that
+is not on iPandu's own `v0.1.x` line, that setting has been lost.
+
+**A fork's HEAD is always ahead of its own last tag.** It keeps taking upstream
+commits, so `git describe` drifts to `v0.1.x-N-g…` after every merge. That is
+normal, not a fault — but it means iPandu has to cut its own release now and
+then, or the release gate has nothing meaningful to check. Bump the README
+status line, add a short CHANGELOG entry, tag it. The entry does not have to be
+long; "upstream merged through vX" is enough.
