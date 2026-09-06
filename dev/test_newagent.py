@@ -118,6 +118,43 @@ check("...nor daemon-reload, which is only reachable after the cp it does not ha
 check("the rule explains the refusal, so the next person to 'fix' the log line "
       "sees why it is deliberate",
       "rewrite" in rule and "root" in rule)
+# The grant and the call site are two files apart, and drifting apart is
+# silent. /update pulled new code, logged "restarting", got "sudo: a password
+# is required", and left the OLD process running while telling the operator the
+# update had applied -- because the rule said "systemctl restart X" and the bot
+# runs "systemctl --no-block restart X", which sudoers does not treat as the
+# same command. Python had already imported the module, so the checkout moved
+# and the behaviour did not: two consecutive fixes shipped and neither took
+# effect. This reads the actual call site instead of trusting the rule.
+la_src = SRC.read_text(encoding="utf-8")
+restart_calls = re.findall(r'\[\s*"sudo"\s*,\s*"-n"\s*,\s*"systemctl"(.*?)\]',
+                           la_src, re.S)
+check("the bot's self-restart call site is found in lite_agent.py",
+      bool(restart_calls))
+checked_any = False
+for raw in restart_calls:
+    argv = re.findall(r'"([^"]+)"', raw)
+    # RESTART calls only. `sudo -n systemctl daemon-reload` is also in there and
+    # is deliberately NOT granted: it is only reachable after the cp into
+    # /etc/systemd/system that this script refuses on purpose, and a check above
+    # asserts daemon-reload stays out of the rule. Demanding coverage for every
+    # sudo call would turn this test into an argument for widening the grant --
+    # the opposite of what it is for.
+    if "restart" not in argv:
+        continue
+    checked_any = True
+    if "SERVICE_NAME" in raw:
+        argv.append("${SERVICE_NAME}")
+    wanted = "systemctl " + " ".join(argv)
+    check(f"the grant authorises exactly what the bot runs: `{wanted}`",
+          wanted in grant)
+check("at least one restart call site was actually examined, so this section "
+      "cannot pass by matching nothing",
+      checked_any)
+check("...and --no-block specifically is covered, since that is the flag that "
+      "made sudo ask for a password and swallowed two updates",
+      "--no-block restart" in grant)
+
 check("the generated rule is validated with visudo before being trusted",
       "visudo -cf" in text)
 check("...and an invalid one is removed rather than left in /etc/sudoers.d",

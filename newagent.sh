@@ -209,7 +209,22 @@ cat > "$SUDOERS_RUNTIME" <<EOF
 # iSmart-LA ${NAME}: /update restarts its own service and nothing else.
 # Deliberately NOT granting writes to ${UNIT_PATH} -- that would let this
 # user rewrite its own unit as root. See newagent.sh.
-${USER_NAME} ALL=(root) NOPASSWD: /usr/bin/systemctl restart ${SERVICE_NAME}, /bin/systemctl restart ${SERVICE_NAME}
+#
+# --no-block is listed FIRST because it is the form the bot actually runs:
+#
+#     subprocess.Popen(["sudo","-n","systemctl","--no-block","restart",SERVICE_NAME])
+#
+# sudoers matches the argument vector literally, so a rule for
+# "systemctl restart X" does NOT authorise "systemctl --no-block restart X".
+# Without this line /update pulled the new code, logged "restarting", got
+# "sudo: a password is required", and left the OLD process running -- while
+# reporting success. Python had already imported the module, so every later
+# fix was invisible: the checkout moved, the behaviour did not. That happened
+# on this deployment for two consecutive updates before anyone noticed.
+#
+# The plain form stays too. It is the same privilege -- restart this one unit --
+# and it is what a human types.
+${USER_NAME} ALL=(root) NOPASSWD: /usr/bin/systemctl --no-block restart ${SERVICE_NAME}, /bin/systemctl --no-block restart ${SERVICE_NAME}, /usr/bin/systemctl restart ${SERVICE_NAME}, /bin/systemctl restart ${SERVICE_NAME}
 EOF
 chmod 440 "$SUDOERS_RUNTIME"
 visudo -cf "$SUDOERS_RUNTIME" >/dev/null || { rm -f "$SUDOERS_RUNTIME"; die "generated sudoers rule is invalid"; }

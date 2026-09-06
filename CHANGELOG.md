@@ -18,6 +18,37 @@
      that gap, but that is the maintainer's call, not something a contributing
      branch should decide by editing a check written one release ago. -->
 
+## Unreleased -- /update could not restart itself, and said it had
+
+The sudoers rule `newagent.sh` writes did not match the command the bot runs.
+
+    rule:  /usr/bin/systemctl            restart <unit>
+    call:  sudo -n systemctl --no-block  restart <unit>
+
+sudoers matches the argument vector literally, so those are two different
+commands. `/update` pulled the new code, logged "UPDATE applied … restarting",
+got `sudo: a password is required`, and left the old process running. It
+reported success, because the restart goes out through `Popen` and nothing
+waits on it.
+
+Python had already imported the module, so the checkout moved and the behaviour
+did not. On this deployment that happened twice in a row -- two fixes shipped,
+neither took effect, and the second was being debugged against a process
+running code from the previous day. `--no-block` itself is right and stays: the
+unit being restarted is the caller, so waiting on it is not an option.
+
+The rule now lists the `--no-block` form first, and keeps the plain one -- the
+same privilege either way, restart this one unit.
+
+The durable half is the test. `dev/test_newagent.py` now reads the call sites
+out of `lite_agent.py` and asserts the generated grant covers exactly what they
+run, so the rule and the command cannot drift apart in silence again. It found
+a third call site immediately -- `sudo -n systemctl daemon-reload` -- which is
+deliberately NOT granted, since it is only reachable through the `cp` into
+/etc/systemd/system that this script refuses on purpose. That one is skipped
+rather than covered: a test that demanded coverage for every sudo call would be
+an argument for widening the grant, which is the opposite of its job.
+
 ## Unreleased -- /addserver names the layer that failed, and both keys
 
 `/addserver` against a Proxmox node returned:
