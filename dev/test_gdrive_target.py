@@ -151,7 +151,9 @@ def update_ok_list_fails(*args, **kw):
 
 with patch.object(mod, "_list_gdrive_accounts", return_value=["gdrive"]), \
      patch.object(mod, "_rclone_run", side_effect=update_ok_list_fails):
-    ok, detail = mod.set_gdrive_target("gdrive", "0BAD")
+    # Well-formed on purpose: this case is about a drive that cannot be
+    # REACHED, so it has to get past the id-shape guard to be tested at all.
+    ok, detail = mod.set_gdrive_target("gdrive", "0AunreachableDrive")
 check("a destination that saves but cannot be listed is reported as FAILED",
       not ok)
 check("...and says the root could not be listed, not something vague",
@@ -161,6 +163,35 @@ with patch.object(mod, "_list_gdrive_accounts", return_value=["gdrive"]):
     ok, detail = mod.set_gdrive_target("nope", "0AB1")
 check("an unknown account is refused before rclone is touched",
       not ok and "nope" in detail)
+
+# A folder id pasted in place of a shared drive id. This happened on the first
+# real attempt: the operator copied the address bar while standing INSIDE the
+# shared drive, and Google answered "Error 404: Shared drive not found" -- true,
+# and useless, because the drive exists and they were looking at it. The two id
+# shapes come from the same kind of URL and differ only in their prefix.
+calls.clear()
+with patch.object(mod, "_list_gdrive_accounts", return_value=["gdrive"]), \
+     patch.object(mod, "_rclone_run", side_effect=record):
+    ok, detail = mod.set_gdrive_target("gdrive", "1xDfWDii0blCuhVHpR3o2gdPl9rk9GEfp")
+check("a FOLDER id in place of a shared drive id is caught", not ok)
+check("...named as a folder id rather than passed to Google to 404 on",
+      "FOLDER id" in detail)
+check("...explaining that shared drive ids begin with 0A", "0A" in detail)
+check("...and where to find the right one", "Shared drives" in detail)
+check("...without touching rclone at all, so nothing is half-set", not calls)
+
+# The valid shape still passes this guard.
+calls.clear()
+with patch.object(mod, "_list_gdrive_accounts", return_value=["gdrive"]), \
+     patch.object(mod, "_rclone_run", side_effect=record):
+    ok, _ = mod.set_gdrive_target("gdrive", "0AKlmNoPqRsTuVw9PVA")
+check("a real shared drive id is not caught by that guard", ok)
+# Clearing must never be mistaken for a bad id -- "" is how My Drive is set.
+calls.clear()
+with patch.object(mod, "_list_gdrive_accounts", return_value=["gdrive"]), \
+     patch.object(mod, "_rclone_run", side_effect=record):
+    ok, _ = mod.set_gdrive_target("gdrive", "")
+check("clearing to My Drive is not rejected by the id-shape guard", ok)
 
 # --- 4. the command is actually reachable ----------------------------------
 src = SRC.read_text(encoding="utf-8")

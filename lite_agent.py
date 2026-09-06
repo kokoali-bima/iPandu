@@ -8433,6 +8433,18 @@ def set_gdrive_target(name: str, drive_id: str) -> tuple[bool, str]:
     """
     if name not in _list_gdrive_accounts():
         return False, f"no Drive account called '{name}'"
+    # Google's two id shapes look alike and are pasted from the same kind of
+    # URL. A shared drive's id begins "0A"; a folder's begins "1". Copying the
+    # address bar while standing INSIDE the shared drive gives the folder --
+    # which rclone then reports as "Error 404: Shared drive not found", true
+    # but unhelpful, since the drive exists and the operator is looking at it.
+    if drive_id and not drive_id.startswith("0A"):
+        return False, (
+            f"'{drive_id}' looks like a FOLDER id, not a shared drive id -- "
+            "shared drive ids begin with 0A. In Google Drive click Shared "
+            "drives in the left sidebar, open the drive, and copy the id from "
+            "the URL without entering any folder. Pick the folder inside it "
+            "later, as part of the upload path.")
     try:
         r = _rclone_run("config", "update", name, f"team_drive={drive_id}",
                         "--non-interactive", timeout=30)
