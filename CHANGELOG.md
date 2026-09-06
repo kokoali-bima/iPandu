@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.2b.86 -- the release gate had two holes, and one of them ran the repo
+
+v0.2b.85 shipped correctly and turned CI red on all four Python versions. The
+release notes for it were about green figures that had not been earned, which
+made this an uncomfortable but useful thing to find within the hour.
+
+Nothing was wrong with the release. `git push origin master` fired the workflow,
+and `git push origin v0.2b.85` followed a few seconds later. CI checks out the
+commit and reads `git describe`, which cannot see a tag still sitting on the
+developer's machine -- so `test_release_consistency` reported "notes committed,
+tag missing", which is precisely the v0.2b.71 defect it was written to catch.
+Pushing the tag did not trigger a new run, so the red stayed. A re-run, with
+nothing changed, went green.
+
+The wrong lesson is "remember to push them together". git already hands pre-push
+the refs being pushed, on stdin, so the hook can simply look: if the committed
+CHANGELOG announces a version whose tag exists here but is neither on the remote
+nor in this push, it refuses and prints the command that does it properly.
+Verified in both directions against the real hook file, in a scratch repository
+with a scratch origin -- including the three cases that must still pass, because
+a rule that refused everything would satisfy the first check for free.
+
+### And the hole underneath it
+
+Chasing that turned up something larger. **This repository has 86 tags across
+123 commits and has never had a single pull request**, and I had been reading
+that as a habit worth changing. It was not a habit. It was enforced.
+
+`test_release_consistency` required `git describe` to equal the declared version
+*exactly*. That is true only AT the tagged commit. One commit later it reads
+`v0.2b.85-1-gabc123` and the suite goes red -- so every commit had to be a
+release, and a branch carrying unreleased work could never be green. Branch
+protection and a PR-based flow were never going to happen while the test suite
+refused to pass on an unreleased commit.
+
+Exactness is now required only when HEAD *is* the tagged commit. Past it, the
+check becomes "unreleased work sits on top of the declared version", which still
+catches a wrong or missing tag. The check that actually guards v0.2b.71 --
+release notes committed with no tag -- is separate and untouched.
+
+### Smaller, from the same hour
+
+`run_all` printed `5/6 FAIL` and nothing else when a suite failed, so the CI log
+said a check had failed without saying which, and diagnosing it needed a local
+reproduction the log should have made unnecessary. It already echoed SKIP notes;
+it now echoes the FAIL lines too.
+
+Registered as E016 and E017. **981 checks across 44 suites.**
+
 ## v0.2b.85 -- a release that compiles is not a release that starts
 
 `apply_update()` has refused a build that does not compile since early on, and

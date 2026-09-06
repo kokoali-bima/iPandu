@@ -185,6 +185,13 @@ for suite in suites:
         for note in out.splitlines():
             if note.startswith("SKIP - "):
                 print(f"    {note}")
+        # And, when a suite fails, WHICH check failed. Without this a
+        # CI log says "5/6 FAIL" and nothing else, and the failure has
+        # to be reproduced locally to find out what it was.
+        if m and got != total:
+            for line in out.splitlines():
+                if line.startswith("FAIL - "):
+                    print(f"    {line}")
 
 elapsed = time.monotonic() - started
 print("-" * 62)

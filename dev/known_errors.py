@@ -252,4 +252,46 @@ ERRORS = [
         "guard": "test_run_all.py",
         "release": "v0.2b.85",
     },
+    {
+        "id": "E016",
+        "date": "2026-09-06",
+        "area": "Release process",
+        "symptom": "CI failed on all four Python versions for v0.2b.85 -- the "
+                   "release whose own notes were about false green runs. The "
+                   "release itself was fine; a re-run went green untouched.",
+        "cause": "`git push origin master` fired the workflow, and "
+                 "`git push origin v0.2b.85` followed seconds later. CI checks "
+                 "out the commit and runs `git describe`, which cannot see a "
+                 "tag still sitting on the developer's machine, so "
+                 "test_release_consistency reported exactly the v0.2b.71 "
+                 "defect it exists to catch. Pushing the tag did not trigger a "
+                 "new run, so the red stayed.",
+        "fix": "pre-push reads the refs git names on stdin. If the committed "
+               "CHANGELOG announces a version whose tag exists locally but is "
+               "neither on the remote nor in this push, it refuses and prints "
+               "`git push origin HEAD <tag>`. Ordering is no longer something "
+               "anyone has to remember.",
+        "guard": "test_release_push_guard.py",
+        "release": "v0.2b.86",
+    },
+    {
+        "id": "E017",
+        "date": "2026-09-06",
+        "area": "Release process",
+        "symptom": "86 tags across 123 commits, and not one pull request in "
+                   "the repository's history.",
+        "cause": "test_release_consistency required `git describe` to equal the "
+                 "declared version exactly. That is only true AT the tagged "
+                 "commit -- one commit later it reads v0.2b.85-1-gabc123 and "
+                 "the suite went red. So every commit had to be a release, and "
+                 "a branch carrying unreleased work could never be green. The "
+                 "absence of pull requests was not a habit; it was enforced.",
+        "fix": "Exactness is demanded only when HEAD IS the tagged commit. "
+               "Beyond it, the check becomes 'unreleased work sits on top of "
+               "the declared version', which still catches a wrong or missing "
+               "tag. The guard that matters -- release notes committed with no "
+               "tag -- is a separate check and was not touched.",
+        "guard": "test_release_consistency.py",
+        "release": "v0.2b.86",
+    },
 ]

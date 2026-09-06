@@ -29,6 +29,14 @@ command -v "$PY" >/dev/null 2>&1 || {
     exit 0
 }
 
+# git names the refs being pushed on stdin, one per line:
+#   <local ref> <local sha> <remote ref> <remote sha>
+# Read it here, once, before anything else touches stdin.
+PUSHED_REFS=""
+while read -r _lref _lsha rref _rsha; do
+    PUSHED_REFS="$PUSHED_REFS $rref"
+done
+
 echo "pre-push: running the full suite before this leaves the machine…"
 if "$PY" dev/run_all.py lite_agent.py >/tmp/isla_prepush.log 2>&1; then
     # Green is not enough. On a machine without python-telegram-bot installed,
@@ -67,6 +75,31 @@ if "$PY" dev/run_all.py lite_agent.py >/tmp/isla_prepush.log 2>&1; then
         echo "Deliberate exception: ISLA_MAX_SKIP=$SKIPPED git push" >&2
         exit 1
     fi
+    # A release commit without its tag is how v0.2b.85 went red on all four
+    # Python versions for no reason: CI fires on the branch push and reads
+    # `git describe`, which cannot see a tag that is still on this machine.
+    TAG_GOING_TOO=""
+    DECLARED=$(awk '/^## v/{print $2; exit}' CHANGELOG.md 2>/dev/null)
+    case "$PUSHED_REFS" in
+        *refs/heads/*)
+            if [ -n "$DECLARED" ] && git rev-parse -q --verify "refs/tags/$DECLARED" >/dev/null 2>&1; then
+                case "$PUSHED_REFS" in
+                    *"refs/tags/$DECLARED"*) TAG_GOING_TOO="yes" ;;
+                esac
+                if [ -z "$TAG_GOING_TOO" ] && ! git ls-remote --exit-code --tags origin "$DECLARED" >/dev/null 2>&1; then
+                    echo >&2
+                    echo "pre-push: REFUSED - CHANGELOG announces $DECLARED and the tag" >&2
+                    echo "exists here, but it is neither on the remote nor in this push." >&2
+                    echo "CI would run against a commit with no tag and report the" >&2
+                    echo "previous version, which is the v0.2b.71 bug." >&2
+                    echo >&2
+                    echo "Push both at once:" >&2
+                    echo "  git push origin HEAD $DECLARED" >&2
+                    exit 1
+                fi
+            fi
+            ;;
+    esac
     tail -3 /tmp/isla_prepush.log
     echo "pre-push: green — pushing."
     exit 0

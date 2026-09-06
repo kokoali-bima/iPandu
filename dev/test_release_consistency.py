@@ -115,9 +115,22 @@ else:
     # The bot reports git describe verbatim, so this is literally what an
     # operator sees after /update.
     ok_desc, described = git("describe", "--tags", "--always")
-    if ok_desc and notes_are_committed and ok_tag:
+    ok_head, head_sha = git("rev-parse", "HEAD")
+    ok_tsha, tag_sha = git("rev-list", "-n", "1", f"v{declared}")
+    at_the_release = ok_head and ok_tsha and head_sha == tag_sha
+
+    if ok_desc and notes_are_committed and ok_tag and at_the_release:
         check(f"git describe would announce v{declared} (says: {described})",
               described == f"v{declared}")
+    elif ok_desc and notes_are_committed and ok_tag:
+        # HEAD has moved past the release. That is ordinary development, and
+        # demanding an exact match here is what forced every single commit in
+        # this repository to be a release -- 86 tags across 123 commits, and
+        # not one pull request, because an unreleased commit failed the suite.
+        # What still has to hold is that the work sits ON TOP of the declared
+        # version rather than beside it or behind it.
+        check(f"unreleased work sits on top of v{declared} ({described})",
+              described.startswith(f"v{declared}-"))
     else:
         print(f"INFO  - git describe currently says: {described or '(none)'}")
 
