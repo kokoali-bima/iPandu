@@ -18,6 +18,33 @@
      that gap, but that is the maintainer's call, not something a contributing
      branch should decide by editing a check written one release ago. -->
 
+## Unreleased -- /addserver names the layer that failed, and both keys
+
+`/addserver` against a Proxmox node returned:
+
+    ssh: connect to host 10.10.95.3 port 22: Network is unreachable
+
+    Usually the public key isn't in place yet, or the user/port is off.
+
+Wrong in the most expensive way available. "Network is unreachable" is a
+routing failure -- the key was never offered -- but the message blamed the key,
+so the operator reinstalled it, failed again, and asked whether the bot's key
+differed from the one they had been handed. Nothing about a key was ever
+involved: the host sat behind a VPN whose subnet was not routed.
+
+`ssh_failure_hint()` reads the error text instead of guessing over it, and
+distinguishes routing, a timeout, a refused port, a name that will not resolve,
+and a changed host key. Only when none of those match -- a publickey refusal,
+or something new -- does the message talk about keys at all.
+
+And when it does, it now shows them. Both. `bootstrap_key_block()` prints the
+key the connection test actually presents -- `agent_keypair()`, which is the
+READ-ONLY key whenever write mode is set up -- alongside the write key that
+`install_node_guard()` needs before it can install the guarded one. Authorising
+only one leaves `/addserver` stuck at whichever step wanted the other, and the
+bot previously named neither, so the operator had to go and find them on the
+box. The same round-trip this entry is about started exactly there.
+
 ## Unreleased -- the read-only guard replaces a hand-installed key
 
 `/addserver` against a UIN host at `172.16.10.76` reported:

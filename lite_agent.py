@@ -1249,6 +1249,97 @@ def test_server_ssh(host: str, user: str, port: int, timeout: int = 20,
     return False, (proc.stderr or proc.stdout or "no response").strip()[-400:]
 
 
+def ssh_failure_hint(detail: str) -> tuple[str, str]:
+    """Which layer actually gave up, in English and Indonesian.
+
+    What this replaces said "usually the public key isn't in place yet, or the
+    user/port is off" for EVERY failure. A real /addserver against a Proxmox
+    node behind a VPN returned "Network is unreachable" -- pure routing, the key
+    was never even offered -- and the operator spent the next few rounds
+    reinstalling a key that had nothing to do with it, then asked whether the
+    bot's key differed from the one they had been given.
+
+    The ssh error text already names the layer. Read it instead of guessing,
+    and only talk about keys when keys are actually the problem.
+    """
+    d = (detail or "").lower()
+    if "network is unreachable" in d or "no route to host" in d:
+        return (
+            "This is a ROUTING failure, not a key problem -- the key was never "
+            "offered. Nothing on this bot's host can reach that address at all. "
+            "If the machine sits behind a VPN, the tunnel has to be up and its "
+            "subnet routed before any key matters.",
+            "Ini kegagalan ROUTING, bukan soal key -- key-nya bahkan belum "
+            "sempat dikirim. Host bot ini sama sekali tidak punya jalur ke "
+            "alamat itu. Kalau mesinnya di balik VPN, tunnel harus naik dan "
+            "subnet-nya harus ter-route dulu, sebelum key jadi relevan.",
+        )
+    if "timed out" in d or "timeout" in d:
+        return (
+            "The address is routable but nothing answered in time -- usually a "
+            "firewall dropping the packets, or the wrong port. Not a key "
+            "problem: a wrong key is refused fast, it does not hang.",
+            "Alamatnya ter-route tapi tidak ada yang menjawab -- biasanya "
+            "firewall membuang paketnya, atau portnya salah. Bukan soal key: "
+            "key yang salah ditolak cepat, tidak menggantung.",
+        )
+    if "connection refused" in d:
+        return (
+            "Something answered and said no: nothing is listening on that port. "
+            "Check the port, and that sshd is running.",
+            "Ada yang menjawab dan menolak: tidak ada yang mendengarkan di port "
+            "itu. Cek portnya, dan pastikan sshd jalan.",
+        )
+    if "could not resolve" in d or "name or service not known" in d:
+        return ("That name does not resolve from this host. Use the raw IP.",
+                "Nama itu tidak bisa di-resolve dari host ini. Pakai IP mentah.")
+    if "host key verification failed" in d:
+        return ("The host's SSH identity changed since it was last seen.",
+                "Identitas SSH host itu berubah sejak terakhir dikenali.")
+    # Permission denied, and anything unrecognised: keys are worth showing.
+    return ("", "")
+
+
+def bootstrap_key_block(lang: str = "id") -> str:
+    """The keys a host must authorise, ready to paste.
+
+    BOTH of them, and that is the point. The connection test presents
+    agent_keypair() -- which is the READ-ONLY key whenever write mode is set up
+    (see agent_keypair()) -- while install_node_guard() needs a key that can
+    already WRITE before it can install the guarded one. Authorising only one
+    leaves /addserver stuck at whichever step wanted the other, and the bot
+    used to name neither, so the operator had to go and find them on the box.
+    """
+    lines = []
+    try:
+        ro_pub = agent_keypair()[1]
+        if ro_pub.exists():
+            lines.append(ro_pub.read_text().strip())
+    except Exception:
+        logger.debug("could not read the agent public key", exc_info=True)
+    try:
+        rw_pub = SSH_RW_KEY.with_suffix(".pub")
+        if rw_pub.exists():
+            rw = rw_pub.read_text().strip()
+            if rw and rw not in lines:
+                lines.append(rw)
+    except Exception:
+        logger.debug("could not read the write public key", exc_info=True)
+    if not lines:
+        return ""
+    keys = "\n".join(lines)
+    head = _t(lang,
+        "Both of these must be in the target's <code>~/.ssh/authorized_keys</code> "
+        "— the first is what the connection test presents, the second is what "
+        "installs the read-only guard. Paste as-is, unrestricted: the bot "
+        "replaces the first with a guarded version itself.",
+        "Keduanya harus ada di <code>~/.ssh/authorized_keys</code> mesin tujuan "
+        "— yang pertama dipakai uji koneksi, yang kedua dipakai memasang guard "
+        "read-only. Tempel apa adanya tanpa pembatas: bot yang akan mengganti "
+        "yang pertama dengan versi ber-guard.")
+    return f"\n\n{head}\n<pre>{_tg_escape(keys)}</pre>"
+
+
 def discover_proxmox(host: str, user: str, port: int) -> tuple[bool, str, list[str]]:
     """Ask a Proxmox node what else is in its cluster, and how many guests.
 
@@ -9063,12 +9154,24 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             None, test_server_ssh, data["host"], data["user"], data["port"],
             20, data.get("key"))
         if not ok:
+            # Name the layer that actually failed, and only offer keys when
+            # keys could plausibly be it. The old message blamed the key every
+            # time; against a host behind a VPN that produced "Network is
+            # unreachable" plus advice to reinstall a key that was never sent.
+            hint_en, hint_id = ssh_failure_hint(detail)
+            if hint_en:
+                tail_en, tail_id = hint_en, hint_id
+            else:
+                tail_en = ("The key this test presents is not authorised on that "
+                           "host yet, or the user/port is wrong.")
+                tail_id = ("Key yang dipakai uji ini belum diizinkan di host itu, "
+                           "atau user/port-nya salah.")
+                tail_en += bootstrap_key_block("en")
+                tail_id += bootstrap_key_block("id")
             await query.edit_message_text(
                 _t(lang,
-                   f"❌ Couldn't connect:\n<pre>{_tg_escape(detail)}</pre>\n\n"
-                   "Usually the public key isn't in place yet, or the user/port is off.",
-                   f"❌ Gagal konek:\n<pre>{_tg_escape(detail)}</pre>\n\n"
-                   "Biasanya public key belum terpasang, atau user/port-nya salah.",
+                   f"❌ Couldn't connect:\n<pre>{_tg_escape(detail)}</pre>\n\n{tail_en}",
+                   f"❌ Gagal konek:\n<pre>{_tg_escape(detail)}</pre>\n\n{tail_id}",
                 ),
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([[
