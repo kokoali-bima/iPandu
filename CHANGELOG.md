@@ -1,5 +1,6 @@
 # Changelog
 
+<<<<<<< HEAD
 ## v0.1.0 -- iPandu splits off from iSmart-LA
 
 Forked from iSmart-LA **v0.2b.76** (`95578c7`) on 5 September 2026, carrying all
@@ -29,6 +30,43 @@ Infrastructure capability is kept, but with its own SSH keypair -- a separate VM
 does not separate the risk if the key is the same.
 
 Baseline: 839 tests across 38 suites, all passing at the fork point.
+=======
+## v0.2b.78 -- the bot notices a machine it has never heard of
+
+Asking the agent to fix something on an unregistered host used to go one of two
+ways depending on which model answered. v0.2b.77 told the models about the write
+gate; this removes the need for them to get it right at all.
+
+When a message carries an IPv4 the inventory has never seen, the bot now says so
+**before the model gets the turn** and offers the deterministic path:
+
+    🆕 192.0.2.10 — port 222, user root is not in the inventory yet.
+       I have no key there, so I cannot reach it. Register it now?
+       [ Register it ] [ Just answer ] [ Cancel ]
+
+Registering goes through the PIN and opens `/addserver` **already filled in**
+with the host, port and user the operator typed in plain language -- re-asking
+for details that were in the first message was most of what made this feel
+heavy. The wizard then asks what it always asked: hypervisor / single VM /
+other, and for a hypervisor, Proxmox or another.
+
+"Just answer" runs the question with no PIN, on purpose: that path grants
+nothing. The agent stays read-only, and if it turns out something must change it
+emits `NEEDS_WRITE:` and the PIN appears then -- the existing gate, rather than a
+second prompt that teaches people to tap through.
+
+Deliberately narrow. Only IPv4 literals: hostnames would fire on every domain
+mentioned in conversation, and a card that cries wolf is a card people dismiss
+without reading. Cluster members already in `cluster_hosts` are not "new", and
+loopback and `0.0.0.0` are ignored -- they appear in log excerpts constantly.
+Only owners and group admins see it, since nobody else could register anything.
+
+The turn is not spent. The model has no key for that machine, so the turn was
+always going to end in a guard refusal -- and on this deployment a turn is a
+median 29 seconds and real tokens.
+
+869/869 across 39 suites.
+>>>>>>> upstream/master
 
 ## v0.2b.77 -- the brief never mentioned the write gate
 
