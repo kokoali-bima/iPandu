@@ -146,6 +146,41 @@ check("the operator is told to change the password afterwards",
       "Change that password now" in src and "Ganti password itu sekarang" in src)
 check("the password is dropped as soon as the call returns", "del pw" in src)
 
+
+
+# --- the advice given after a host is registered ---------------------------
+# The operator decided NOT to have the bot reconfigure sshd -- that is the one
+# change here that locks you out permanently when it goes wrong. So it hands
+# over the exact commands instead, and only when the host is actually still
+# accepting passwords.
+advice_id = mod.harden_ssh_advice("id")
+advice_en = mod.harden_ssh_advice("en")
+
+check("the advice exists in both languages",
+      "PasswordAuthentication no" in advice_id and "PasswordAuthentication no" in advice_en)
+check("it writes a DROP-IN, not a sed over the main config -- which "
+      "60-cloudimg-settings.conf would silently override",
+      "sshd_config.d/00-ismart-hardening.conf" in advice_id
+      and "sed -i" not in advice_id)
+check("the filename sorts FIRST, because sshd takes the first value it reads",
+      "00-ismart-hardening" in advice_id)
+check("it validates the config before reloading, so a typo cannot lock anyone out",
+      "sshd -t &" in advice_id)
+check("it reloads rather than restarts, so live sessions survive",
+      "reload" in advice_id and "restart ssh" not in advice_id)
+check("it tells the operator how to VERIFY, not just to trust it",
+      "sshd -T | grep -i passwordauth" in advice_id)
+check("...and to keep a session open as the way back",
+      "tetap terbuka" in advice_id and "open" in advice_en)
+check("it explains why the name starts with 00, so nobody 'tidies' it later",
+      "nilai pertama" in advice_id and "first value" in advice_en)
+
+src2 = Path(SRC).read_text(encoding="utf-8")
+check("the state is read from sshd itself, not from the config file",
+      '"sshd -T"' in src2)
+check("the advice only appears when the host really still allows passwords",
+      "if still_open:" in src2)
+
 failed = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed")
 if failed:
