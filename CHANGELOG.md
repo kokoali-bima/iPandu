@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.1.1 -- upstream merged through iSmart-LA v0.2b.80
+
+Substrate pulled from production: the unknown-host offer, credential detection
+in chat, the group delete-permission check, the write-window changes, and the
+reply-target guard. `lite_agent.py` remains byte-identical to iSmart-LA.
+
+Two things the merges taught, both now fixed here rather than remembered:
+
+- **`git fetch upstream` brought iSmart-LA's tags with it** -- 83 of them. That
+  quietly undid the reason they were dropped at fork time: `current_version()`
+  reads `git describe --tags`, so the assistant would have reported a production
+  version. Found by the release gate, not by eye. `remote.upstream.tagOpt` is
+  `--no-tags` now, so a fetch cannot bring them back.
+- **A fork's HEAD is always ahead of its own last tag**, because it keeps taking
+  upstream commits. That is normal, not a fault -- but it means iPandu has to cut
+  its own releases to keep the gate meaningful. This is the first.
+
 ## v0.1.0 -- iPandu splits off from iSmart-LA
 
 Forked from iSmart-LA **v0.2b.76** (`95578c7`) on 5 September 2026, carrying all

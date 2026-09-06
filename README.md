@@ -12,7 +12,7 @@ are used as **tools**, not as a second GUI: the agent sends an email the same
 way it sends a file, through the marker protocol, with the same PIN gate on
 anything that leaves the building.
 
-> **Status: v0.1.0 — experimental.** This is where new things get tried. The
+> **Status: v0.1.1 — experimental.** This is where new things get tried. The
 > agent that runs production is iSmart-LA, not this one. If you want something
 > stable to look after a cluster, use that repo.
 >
