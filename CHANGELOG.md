@@ -47,6 +47,36 @@ does not separate the risk if the key is the same.
 
 Baseline: 839 tests across 38 suites, all passing at the fork point.
 
+## v0.2b.83 -- "it must be bilingual" stops depending on anyone remembering
+
+The operator has had to say this more than once. That is the signal that it
+should be a gate, not a habit.
+
+`audit_lang.py` already existed and reads well, but it proves nothing: it flags
+38 call sites, most of them false positives where the text was built from `_t()`
+a few lines earlier. Useful for reading, useless for stopping a release.
+
+`dev/test_bilingual.py` does two things instead:
+
+- **Pins the 27 messages added across v0.2b.78-82** by fragment, so this run's
+  work cannot quietly lose a half later.
+- **Walks every `_t()` call structurally** -- all **446** of them -- and fails if
+  any carries fewer than two halves, or an empty one. A message added in English
+  only fails on the day it is written, not when someone running `/lang id` finds
+  it months later.
+
+Proven in both directions rather than asserted: on a copy with one deliberately
+English-only message inserted, the gate named the exact line and failed the run.
+
+One detail worth recording, because it caused three false alarms in a single
+day: fragment matching has to join adjacent string literals first. Python
+concatenates `"a " "b"` into `"a b"`; a substring search does not. Three of these
+messages first reported MISSING while being present and correct -- exactly as two
+assertions elsewhere did the same afternoon. The check normalises the source
+before matching now.
+
+929/929 across 41 suites.
+
 ## v0.2b.82 -- how to close off password logins, without doing it for you
 
 Turning off password authentication is the one change in this whole area that
