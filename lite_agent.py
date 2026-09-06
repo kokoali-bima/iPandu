@@ -1299,6 +1299,83 @@ def _write_servers(items: list[dict]) -> None:
     SERVERS_FILE.write_text(json.dumps(items, indent=2))
 
 
+# --------------------------------------------------------------------------
+# "That host isn't in the inventory yet"
+#
+# The friction being removed: asking the agent to fix something on a machine it
+# has never heard of used to go one of two ways, depending on which model was
+# answering. Measured on a live host over 36 hours -- registering a Proxmox went
+# smoothly on Gemini and cost ten circular turns on Sonnet, which hit the
+# read-only guard and tried to route around it instead of asking for access.
+#
+# /addserver has never had that problem, because it never involves the model at
+# all: it is a deterministic wizard that runs BEFORE the model is called. So the
+# fix is not to teach the models better -- it is to notice the unknown host
+# ourselves and put the deterministic path in front of the operator.
+#
+# Deliberately narrow: an IPv4 literal in the message. A hostname would drag in
+# every domain anyone ever mentions in conversation, and the false positives
+# would train people to dismiss the card without reading it.
+# --------------------------------------------------------------------------
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+_PORT_HINT_RE = re.compile(r"\bport(?:\s+ssh)?\s*:?\s*(\d{2,5})\b", re.I)
+_USER_HINT_RE = re.compile(r"\buser(?:name)?\s*:?\s*([a-z_][a-z0-9_-]{0,31})\b", re.I)
+
+
+def _known_hosts() -> set[str]:
+    """Every address already in the inventory, including cluster members --
+    a node reached through its cluster is not an unknown machine."""
+    known: set[str] = set()
+    for s in _read_servers():
+        if s.get("host"):
+            known.add(str(s["host"]).strip().lower())
+        for extra in (s.get("cluster_hosts") or []):
+            known.add(str(extra).strip().lower())
+    return known
+
+
+def _valid_ipv4(text: str) -> bool:
+    parts = text.split(".")
+    return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
+
+
+def unregistered_hosts_in(text: str) -> list[str]:
+    """IPv4 addresses in `text` that the inventory has never heard of.
+
+    Private-range and public alike -- what matters is whether we know it, not
+    where it lives. Loopback and 0.0.0.0 are dropped: they are never a machine
+    someone wants registered, and they show up in log excerpts constantly.
+    """
+    known = _known_hosts()
+    out: list[str] = []
+    for cand in _IPV4_RE.findall(text or ""):
+        if not _valid_ipv4(cand):
+            continue
+        if cand.startswith("127.") or cand in ("0.0.0.0", "255.255.255.255"):
+            continue
+        low = cand.lower()
+        if low not in known and low not in out:
+            out.append(low)
+    return out
+
+
+def parse_host_hints(text: str) -> dict:
+    """Port and user, when the operator already said them.
+
+    They usually do -- "ip 192.0.2.10 port ssh 222 user root" is how the request
+    arrives. Picking those up means the wizard opens already filled in rather
+    than asking for what was in the first message.
+    """
+    hints: dict = {}
+    m = _PORT_HINT_RE.search(text or "")
+    if m and 1 <= int(m.group(1)) <= 65535:
+        hints["port"] = int(m.group(1))
+    m = _USER_HINT_RE.search(text or "")
+    if m:
+        hints["user"] = m.group(1)
+    return hints
+
+
 def agent_keypair() -> tuple[Path, Path]:
     """The key the agent presents to managed hosts.
 
@@ -8280,7 +8357,9 @@ async def _pin_verified(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     if action == "addserver":
-        await _begin_addserver(update, query)
+        # payload carries a prefill when the operator got here from the
+        # unknown-host card rather than by typing /addserver.
+        await _begin_addserver(update, query, prefill=(payload or {}).get("prefill"))
         return
 
     if action == "gdrive_mutate":
@@ -8776,6 +8855,91 @@ async def cmd_providers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await _reply_chunked(update, "\n".join(lines), already_html=True)
 
 
+_pending_newhost: dict[int, dict] = {}      # chat_id -> {"host", "hints", "text"}
+
+
+async def offer_register_host(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                              host: str, hints: dict, text: str) -> None:
+    """Ask whether an unknown machine should be registered, before answering.
+
+    Shown INSTEAD of running the model, not alongside it. Two reasons: the model
+    cannot do anything useful with a machine it has no key for, and a turn that
+    was always going to fail still costs a turn -- median 29s and real tokens on
+    this deployment.
+    """
+    lang = _chat_lang(update)
+    _pending_newhost[update.effective_chat.id] = {
+        "host": host, "hints": hints, "text": text,
+        "expires": _dt.datetime.now().timestamp() + SERVER_WIZARD_TTL,
+    }
+    bits = []
+    if hints.get("port"):
+        bits.append(f"port {hints['port']}")
+    if hints.get("user"):
+        bits.append(f"user {hints['user']}")
+    detail = (" — " + ", ".join(bits)) if bits else ""
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(_t(lang, "➕ Register it", "➕ Daftarkan"),
+                              callback_data="newhost:reg")],
+        [InlineKeyboardButton(_t(lang, "💬 Just answer", "💬 Jawab saja"),
+                              callback_data="newhost:skip")],
+        [InlineKeyboardButton(_t(lang, "✖️ Cancel", "✖️ Batal"),
+                              callback_data="newhost:cancel")],
+    ])
+    await _msg(update).reply_text(
+        _t(lang,
+           f"🆕 <b>{_tg_escape(host)}</b>{_tg_escape(detail)} is not in the "
+           f"inventory yet.\n\nI have no key there, so I cannot reach it. "
+           f"Register it now?",
+           f"🆕 <b>{_tg_escape(host)}</b>{_tg_escape(detail)} belum ada di "
+           f"inventaris.\n\nSaya belum punya kunci di sana, jadi belum bisa "
+           f"menjangkaunya. Daftarkan sekarang?"),
+        parse_mode="HTML", reply_markup=kb)
+
+
+async def cmd_newhost_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Answer to the unknown-host card."""
+    query = update.callback_query
+    await query.answer()
+    lang = _chat_lang(update)
+    chat_id = update.effective_chat.id
+    pending = _pending_newhost.get(chat_id)
+    action = query.data.split(":", 1)[1]
+
+    if action == "cancel" or not pending:
+        _pending_newhost.pop(chat_id, None)
+        await query.edit_message_text(_t(lang, "✖️ Dropped.", "✖️ Dibatalkan."))
+        return
+
+    if action == "skip":
+        # Answer the question without registering. No PIN here on purpose: this
+        # path grants nothing. The agent stays read-only, and if it turns out it
+        # must change something it emits NEEDS_WRITE and the PIN appears then --
+        # the existing, tested gate, rather than a second prompt that teaches
+        # people to tap through.
+        _pending_newhost.pop(chat_id, None)
+        await query.edit_message_text(_t(lang,
+            "💬 Answering without registering. I still have no access there.",
+            "💬 Dijawab tanpa didaftarkan. Saya tetap belum punya akses ke sana."))
+        await _run_turn(update, context, pending["text"])
+        return
+
+    if action == "reg":
+        if not _is_owner(update) and not await _is_group_admin(update, context):
+            await query.edit_message_text(_t(lang,
+                "🔒 Bot owner or a group admin only.",
+                "🔒 Cuma pemilik bot atau admin grup."))
+            return
+        prefill = {"host": pending["host"], **pending["hints"]}
+        _pending_newhost.pop(chat_id, None)
+        if pin_is_set(chat_id):
+            await request_pin(update, "addserver", {"prefill": prefill},
+                              _t(lang, f"➕ Registering {pending['host']}.",
+                                       f"➕ Mendaftarkan {pending['host']}."))
+        else:
+            await _begin_addserver(update, query=query, prefill=prefill)
+
+
 async def cmd_addserver(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Register a machine the agent may reach. PIN first -- this grants access."""
     if not _may_run_setup(update):
@@ -8801,9 +8965,13 @@ async def cmd_addserver(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _begin_addserver(update)
 
 
-async def _begin_addserver(update: Update, query=None) -> None:
+async def _begin_addserver(update: Update, query=None, prefill: Optional[dict] = None) -> None:
+    # `prefill` carries what the operator already typed in plain language --
+    # "fix the app on 192.0.2.10, ssh port 222, user root". Re-asking for
+    # details that were in the first message is most of what made this feel
+    # heavy, and none of it is information the wizard has to hear twice.
     _server_wizard[update.effective_chat.id] = {
-        "step": "kind", "data": {},
+        "step": "kind", "data": dict(prefill or {}),
         "expires": _dt.datetime.now().timestamp() + SERVER_WIZARD_TTL,
     }
     lang = _chat_lang(update)
@@ -9824,6 +9992,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if await _handle_server_input(update, context):
         return
 
+    # An IPv4 the inventory has never seen. Offer the deterministic wizard
+    # BEFORE the model gets the turn -- it has no key for that machine, so the
+    # turn would only end in a guard refusal and, depending on the model, a
+    # handful of circular retries. Only for owners and group admins: anyone
+    # else could not register it anyway, and a card offering something you
+    # cannot do is worse than no card.
+    if (msg is not None and (msg.text or "")
+            and update.effective_chat.id not in _server_wizard
+            and (_is_owner(update) or await _is_group_admin(update, context))):
+        unknown = unregistered_hosts_in(msg.text)
+        if unknown:
+            await offer_register_host(update, context, unknown[0],
+                                      parse_host_hints(msg.text), msg.text)
+            return
+
     # An attached image, saved somewhere the model can open. A screenshot with
     # a caption -- "look at this, which one do I pick?" -- used to match no
     # handler at all and vanish without a word, which is the worst way for
@@ -10389,6 +10572,8 @@ def main() -> None:
     app.add_handler(CommandHandler("gdrivestatus", cmd_gdrivestatus))
     app.add_handler(CallbackQueryHandler(cmd_server_button, pattern="^srv:"))
     app.add_handler(CallbackQueryHandler(cmd_needwrite_button, pattern="^nw:"))
+    app.add_handler(CallbackQueryHandler(cmd_newhost_button,
+                                        pattern="^newhost:"))
     app.add_handler(CallbackQueryHandler(cmd_extend_write_button,
                                         pattern="^extend_write:"))
     app.add_handler(CommandHandler("agentstatus", cmd_agentstatus))
