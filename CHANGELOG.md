@@ -30,6 +30,42 @@ does not separate the risk if the key is the same.
 
 Baseline: 839 tests across 38 suites, all passing at the fork point.
 
+## v0.2b.77 -- the brief never mentioned the write gate
+
+Registering a Proxmox went smoothly on Gemini and badly on Sonnet. That reads
+like a model problem. The logs say otherwise.
+
+Across 36 hours on that host there were **two** write-mode mentions, one of them
+the Gemini unlock that worked. Sonnet never emitted `NEEDS_WRITE:` at all. It
+ran into `pve-ro-guard: refused`, treated it as a fault to route around, and
+spent ten turns doing that. There were **zero application errors** in the same
+window -- the six logged were `telegram.error.NetworkError: Bad Gateway`, a
+14-second Telegram outage the bot rode through, with no line touching
+`lite_agent.py`.
+
+`CAPABILITIES_BRIEF` -- added in v0.2b.73 so capabilities ship with the code
+rather than with the install -- covered media and Drive markers and said
+**nothing** about the write gate. Not `NEEDS_WRITE`, not the guard, not
+`/addserver`. Sonnet was not being difficult; it had not been told.
+
+It now covers both:
+
+- **Asking for write access.** The read-only key and the guard on the far side
+  are normal, not a fault. Do not retry, do not hunt for a command that slips
+  past, do not tell the operator their key is broken -- emit
+  `NEEDS_WRITE: <what>` and let the PIN prompt do its job.
+- **Adding a server.** Do not improvise a registration: no editing
+  `~/.ssh/config`, no appending to `authorized_keys`, no asking for a password.
+  Tell the operator to run `/addserver`. The wizard is deterministic and
+  **never involves the model at all** -- it runs before the model is called --
+  so anything assembled by hand instead is strictly worse.
+
+The brief grows from ~445 to ~709 tokens, paid once per conversation. That is
+the cost of removing model variance from the most consequential operation this
+bot performs.
+
+844/844 across 38 suites.
+
 ## v0.2b.76 -- the whole class, not the three that fired
 
 v0.2b.75 fixed three crashes that shared one shape: code reached for
@@ -430,7 +466,7 @@ index is only useful if it describes the code as it is now.
 
 Proven against the incident it exists for -- reintroducing the duplicate `_msg`
 into a scratch copy produced exactly the warning it should:
-`_msg — line 3479 _msg(update), line 6732 _msg(lang, detail)`.
+`_msg â€” line 3479 _msg(update), line 6732 _msg(lang, detail)`.
 
 One bug in the guard, found by running it rather than reasoning about it: it
 skipped when `OUT_DIR.parent` did not exist, which does not work on Linux,
@@ -710,7 +746,7 @@ own account included. The reply said only "Access was declined in the browser",
 which sends the reader looking in exactly the wrong place.
 
 It now names the Testing-status cause and gives the fix in the console's
-current menu path: **Google Auth Platform → Audience → Publish app**.
+current menu path: **Google Auth Platform â†’ Audience â†’ Publish app**.
 
 The setup card was also still saying "OAuth consent screen", which Google has
 since renamed, and did not warn that skipping Publish produces this specific
@@ -1283,7 +1319,7 @@ Full suite: **325/325 across 19 suites**, in one command.
 Found by an external architecture review, verified here, and it is the kind of
 bug that is invisible from any machine new enough to run the code:
 
-    f"{'✅ ' if a == effective else ''}{a}"      # lite_agent.py:5013
+    f"{'âœ… ' if a == effective else ''}{a}"      # lite_agent.py:5013
 
 A backslash escape INSIDE an f-string expression only became legal in Python
 3.12 (PEP 701). On 3.10 and 3.11 that is a SyntaxError at import time -- so
@@ -1304,7 +1340,7 @@ up to "confirmed".
 
 Fixed by binding the literal to a name first, which is valid on every version:
 
-    tick = "✅ "
+    tick = "âœ… "
     f"{tick if a == effective else ''}{a}"
 
 Checked for siblings while in there: this was the ONLY such f-string in the
@@ -1642,7 +1678,7 @@ Two parts to the fix:
 
 Also here, since it is the same class of problem v0.2b.40 fixed for turns:
 /graduate's CLI call now goes through an executor instead of blocking the
-event loop, and the reply is tagged `— graduated from <tier>` so it is
+event loop, and the reply is tagged `â€” graduated from <tier>` so it is
 visible which history it was built from.
 
 New: `dev/test_graduate.py`, 16 tests -- target resolution in every
@@ -2056,14 +2092,14 @@ suites (357 tests) re-run with no regressions; 363 total.
 ## v0.2b.31 -- replies contained raw LaTeX Telegram can't render
 
 Reported live, with a screenshot: a weather report came back with
-`$44^\circ\text{C}$` printed literally, instead of "44°C". Telegram's legacy
+`$44^\circ\text{C}$` printed literally, instead of "44Â°C". Telegram's legacy
 Markdown (what every reply here is sent with) has no math/LaTeX rendering at
 all -- the model had no reason not to reach for LaTeX notation for a
 temperature, since nothing in its brief said Telegram couldn't display it.
 
 Added a short rule to both brief templates, right after the opening persona
 paragraph: no LaTeX/KaTeX syntax, ever, plain text or basic Unicode instead
-(44°C, 10x, H2O). Applied directly to the two live deployments' already-generated
+(44Â°C, 10x, H2O). Applied directly to the two live deployments' already-generated
 briefs too (itbutler, bscloud) -- new installs get it from the template, but
 those two were already running before this fix existed, and briefs aren't
 regenerated by an update. Anchored the live edit on the `## Environment:`
@@ -2189,7 +2225,7 @@ tests) re-run with no regressions; 317 total.
 
 Follow-up to v0.2b.26, found from a live screenshot: the reauth notice fired
 correctly ("Gemini is signed out"), but running /start right after still
-showed "✅ Antigravity (Gemini) sudah sign-in." -- as if nothing had
+showed "âœ… Antigravity (Gemini) sudah sign-in." -- as if nothing had
 happened. Confusing on its own, and worse: tapping "Change Gemini" to fix it
 already works completely through Telegram (`cmd_setup_button` starts a real
 OAuth attempt unconditionally, the checkmark was never a gate), so the only
@@ -2882,7 +2918,7 @@ the same as `/addserver` -- owner anywhere, or a registered group's own admin --
 picking a heavier tier spends this deployment's own shared subscription quota.
 
 A forced tier is tried first but the default chain still backs it up on failure rather
-than hard-erroring -- the `— by ...` tag on every reply already surfaces whenever that
+than hard-erroring -- the `â€” by ...` tag on every reply already surfaces whenever that
 safety net had to fire, so silently falling back is more useful than leaving the user
 with nothing.
 
@@ -3071,7 +3107,7 @@ than by asking the model nicely. Capped at 60 entries, deduped, reported in chat
 reversible with `/forget`. New: `/learned`, `/forget <n>`.
 
 **Replies are formatted.** Model Markdown is converted to the HTML subset Telegram
-supports (headings->bold, `-`->•, tables->`<pre>`, rules->a line), escaped first, code
+supports (headings->bold, `-`->â€¢, tables->`<pre>`, rules->a line), escaped first, code
 spans protected, chunked on line boundaries so tags never split across messages, with a
 plain-text fallback if Telegram still rejects the entities. Reports previously arrived
 showing their raw Markdown source.

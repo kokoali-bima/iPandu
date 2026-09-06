@@ -101,3 +101,40 @@ Repository documentation, code comments and commit messages are in **English**,
 the same as iSmart-LA. What the bot says **in Telegram stays bilingual**
 (English and Indonesian) — that is a product behaviour, not a repo convention,
 and it does not change here.
+
+## Merging in practice — what the first real merge showed
+
+The first pull from upstream (v0.2b.77) is worth recording, because it settled
+what the theory could not.
+
+**`lite_agent.py` merged with zero conflicts** and came out byte-identical to
+production. The discipline works: while iPandu only adds files, the shared 79%
+flows in for free.
+
+**Two files conflicted, and they will conflict again:** `README.md` and
+`CHANGELOG.md` — the only two iPandu deliberately rewrote. That is expected and
+cheap, but one of the two was self-inflicted:
+
+- `CHANGELOG.md` conflicts because both sides insert at the top. Resolution:
+  keep iPandu's `v0.1.0` entry above, let upstream's entries follow. Mechanical,
+  same every time.
+- `README.md` conflicted because the fork **deleted** the inherited
+  `Status: v0.2b.xx` paragraph, and upstream then edited that same line — git
+  cannot resolve a delete against a modify. Fixed by restoring that paragraph
+  below iPandu's own header. Both now coexist: iPandu's status is read first (it
+  is higher up), and upstream's version bumps land in the inherited block
+  without touching anything of ours.
+
+The lesson generalises: **do not delete what upstream still maintains.** Add
+above it, or leave it alone. Deleting an upstream line converts every future
+edit to it into a conflict.
+
+Recipe when the merge stops:
+
+```bash
+git fetch upstream
+git merge upstream/master        # expect CHANGELOG.md to conflict
+# keep iPandu's v0.1.0 entry on top, take upstream's entries below
+git add CHANGELOG.md && git commit
+python3 dev/run_all.py lite_agent.py    # must still be green
+```
