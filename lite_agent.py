@@ -1879,6 +1879,95 @@ def verify_node_guard(host: str, user: str, port: int) -> tuple[bool, str]:
     return True, "write refused (not by pve-ro-guard): " + detail
 
 
+# --------------------------------------------------------------------------
+# Bootstrapping the first key onto a host we cannot reach yet
+#
+# install_node_guard() does everything else -- guard script, read-only key
+# behind it, write key -- but it needs a key that already works. On a brand new
+# machine there is none, and the operator was told to paste a command into a
+# terminal somewhere else. That is the step people put off.
+#
+# So: one password, used once, to place the write key. After that the existing
+# path takes over unchanged.
+#
+# No new dependency. `ssh` reads the password from SSH_ASKPASS when there is no
+# terminal, which was verified on this fleet against a host that offers password
+# auth (OpenSSH 9.6; SSH_ASKPASS_REQUIRE needs 8.4+). paramiko would have cost
+# seven packages in a project that has one.
+#
+# The password never touches disk. The obvious helper echoes the secret, which
+# writes it to a file -- exactly what this feature exists to avoid. This one
+# reads an environment variable, so the file on disk holds a variable name and
+# nothing else.
+# --------------------------------------------------------------------------
+def bootstrap_key_with_password(host: str, user: str, port: int,
+                                password: str) -> tuple[bool, str]:
+    """Place the agent's write key on `host` using a password, once.
+
+    Returns (ok, detail). `detail` is safe to show: it never contains the
+    password, and ssh's own stderr is filtered for anything that echoes it.
+    """
+    rw_pub_path = SSH_RW_KEY.with_suffix(".pub")
+    if not rw_pub_path.exists():
+        return False, "no write key exists on this deployment yet"
+    rw_pub = rw_pub_path.read_text().strip()
+    if not rw_pub:
+        return False, "the write public key is empty"
+
+    work = Path(tempfile.mkdtemp(prefix="isla_bootstrap_"))
+    try:
+        helper = work / "askpass.sh"
+        # The helper carries no secret -- only the name of the variable.
+        helper.write_text('#!/bin/sh\nprintf "%s" "$ISLA_SSH_PW"\n', encoding="utf-8")
+        helper.chmod(0o700)
+
+        env = os.environ.copy()
+        env.update({
+            "ISLA_SSH_PW": password,
+            "SSH_ASKPASS": str(helper),
+            "SSH_ASKPASS_REQUIRE": "force",
+            "DISPLAY": env.get("DISPLAY", ":0"),
+        })
+
+        # Append the key only if it is not already there, so a retry cannot
+        # produce a duplicate line.
+        marker = rw_pub.split()[1][:40]
+        remote = (
+            "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; "
+            f"grep -qF '{marker}' ~/.ssh/authorized_keys || "
+            f"printf '%s\\n' '{rw_pub}' >> ~/.ssh/authorized_keys"
+        )
+        cmd = ["setsid", "ssh",
+               "-o", "StrictHostKeyChecking=no",
+               "-o", "PreferredAuthentications=password",
+               "-o", "PubkeyAuthentication=no",
+               "-o", "NumberOfPasswordPrompts=1",
+               "-o", "ConnectTimeout=20",
+               "-p", str(port), f"{user}@{host}", remote]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=60, env=env)
+        except FileNotFoundError:
+            return False, "setsid or ssh is missing on this host"
+        except subprocess.TimeoutExpired:
+            return False, "the machine did not answer in time"
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()
+            if "Permission denied" in err:
+                return False, "wrong password, or that user may not log in with one"
+            return False, err[-300:] or "ssh failed with no message"
+    finally:
+        # Before anything else can read it, and whatever happened above.
+        shutil.rmtree(work, ignore_errors=True)
+
+    # Not "the command exited 0" -- prove the KEY works, with the password out
+    # of the picture entirely. That is the only evidence that matters.
+    ok, detail = test_server_ssh(host, user, port, key_path=str(SSH_RW_KEY))
+    if not ok:
+        return False, ("the key was written but does not work yet: " + detail)
+    return True, detail
+
+
 def secure_server(host: str, user: str, port: int) -> tuple[bool, str]:
     """Install the guard and prove it refuses a write. Nothing is retired here.
 
@@ -9228,6 +9317,38 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await _finish_addserver(update, query)
         return
 
+    if action == "usepw":
+        # Ask for the password only where the bot can clear it again. Finding
+        # out afterwards that it cannot is finding out too late.
+        if not await bot_can_delete_here(update, context):
+            await query.edit_message_text(_t(lang,
+                "🔒 I can only take a password where I am able to delete your "
+                "message again. Here I cannot.\n\nEither continue in a private "
+                "chat with me, or make me an admin in this group with "
+                "<b>Delete messages</b> — I do not need to add or remove members.",
+                "🔒 Saya hanya mau menerima password di tempat yang pesannya bisa "
+                "saya hapus lagi. Di sini saya tidak bisa.\n\nLanjutkan di chat "
+                "pribadi dengan saya, atau jadikan saya admin di grup ini dengan "
+                "izin <b>Hapus pesan</b> — saya tidak butuh izin menambah atau "
+                "mengeluarkan anggota."), parse_mode="HTML")
+            return
+        state["step"] = "password"
+        await query.edit_message_text(_t(lang,
+            f"🔐 Send the <b>{_tg_escape(data['user'])}</b> password for "
+            f"<b>{_tg_escape(data['host'])}</b> as your next message.\n\n"
+            "I delete it the moment it arrives, use it once to place my key, "
+            "and never write it anywhere. It still passes through Telegram to "
+            "get here — so change it afterwards, or use a temporary one.\n\n"
+            "/cancel to stop.",
+            f"🔐 Kirim password <b>{_tg_escape(data['user'])}</b> untuk "
+            f"<b>{_tg_escape(data['host'])}</b> sebagai pesan berikutnya.\n\n"
+            "Saya hapus begitu masuk, dipakai sekali untuk menaruh kunci saya, "
+            "dan tidak pernah ditulis ke mana pun. Tapi ia tetap melewati "
+            "Telegram untuk sampai ke sini — jadi ganti setelahnya, atau pakai "
+            "password sementara.\n\n"
+            "/cancel untuk berhenti."), parse_mode="HTML")
+        return
+
     if action == "test":
         await query.edit_message_text(_t(lang, "🔌 Testing the connection…", "🔌 Menguji koneksi…"))
         loop = asyncio.get_running_loop()
@@ -9350,6 +9471,55 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
             ), parse_mode="HTML")
             return True
         return False
+    if state and state["step"] == "password":
+        # Delete FIRST. Everything after this can fail; the message sitting in
+        # the chat is the one thing that must not survive a failure.
+        pw = (_msg(update).text or "")
+        try:
+            await _msg(update).delete()
+            cleared = True
+        except Exception:
+            cleared = False
+            logger.warning("could not delete the password message")
+        if pw.strip().lower() in ("/cancel", "cancel", "batal"):
+            _server_wizard.pop(chat_id, None)
+            await _msg(update).reply_text(_t(lang, "✖️ Cancelled. Nothing was saved.",
+                                                   "✖️ Dibatalkan. Tidak ada yang disimpan."))
+            return True
+        data = state["data"]
+        note = "" if cleared else _t(lang,
+            "\n\n⚠️ I could not delete your message — delete it yourself.",
+            "\n\n⚠️ Pesan Anda tidak bisa saya hapus — tolong hapus sendiri.")
+        await _msg(update).reply_text(_t(lang,
+            f"🔐 Placing my key on {_tg_escape(data['host'])}…{note}",
+            f"🔐 Memasang kunci saya di {_tg_escape(data['host'])}…{note}"),
+            parse_mode="HTML")
+        ok, detail = await asyncio.get_running_loop().run_in_executor(
+            None, bootstrap_key_with_password,
+            data["host"], data["user"], int(data.get("port") or 22), pw)
+        del pw          # not kept a moment longer than the call needs it
+        if not ok:
+            state["step"] = "authorize"
+            await _msg(update).reply_text(_t(lang,
+                f"⚠️ That did not work: {_tg_escape(detail)}\n\n"
+                "Try the button again, or authorise the key by hand.",
+                f"⚠️ Belum berhasil: {_tg_escape(detail)}\n\n"
+                "Coba tombolnya lagi, atau otorisasi kuncinya manual."),
+                parse_mode="HTML")
+            return True
+        state["step"] = "authorize"
+        await _msg(update).reply_text(_t(lang,
+            f"✅ Key installed and verified on {_tg_escape(data['host'])} "
+            f"({_tg_escape(detail)}).\n\n"
+            "<b>Change that password now</b> — it travelled through Telegram to "
+            "reach me. I never stored it.\n\nTap Test to finish registering.",
+            f"✅ Kunci terpasang dan terverifikasi di {_tg_escape(data['host'])} "
+            f"({_tg_escape(detail)}).\n\n"
+            "<b>Ganti password itu sekarang</b> — ia melewati Telegram untuk "
+            "sampai ke saya. Saya tidak pernah menyimpannya.\n\n"
+            "Tap Tes untuk menyelesaikan pendaftaran."), parse_mode="HTML")
+        return True
+
     if not state or state["step"] not in ("name", "host", "user", "port"):
         return False
     if state["expires"] < _dt.datetime.now().timestamp():
@@ -9452,10 +9622,16 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
            "key di chat.</i>\n\nLalu tap Test.",
         ),
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(_t(lang, "🔌 Test connection", "🔌 Tes koneksi"), callback_data="srv:test:"),
-            InlineKeyboardButton(_t(lang, "✖️ Cancel", "✖️ Batal"), callback_data="srv:cancel:"),
-        ]]),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                _t(lang, "🔐 Install it for me (password once)",
+                         "🔐 Pasangkan saja (password sekali)"),
+                callback_data="srv:usepw:")],
+            [InlineKeyboardButton(_t(lang, "🔌 Test connection", "🔌 Tes koneksi"),
+                                  callback_data="srv:test:"),
+             InlineKeyboardButton(_t(lang, "✖️ Cancel", "✖️ Batal"),
+                                  callback_data="srv:cancel:")],
+        ]),
     )
     if others:
         # Already have a key that reaches this machine? Say so instead of
