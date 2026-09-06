@@ -30,6 +30,49 @@ does not separate the risk if the key is the same.
 
 Baseline: 839 tests across 38 suites, all passing at the fork point.
 
+## v0.2b.79 -- a password typed into the chat is caught in code, not by a model
+
+Handing over credentials is the natural thing to do when a machine needs them.
+It is also the one thing that cannot be taken back: a password typed here sits
+in this chat's history, on both devices, and on Telegram's servers, and deleting
+the message does not undo that it was sent.
+
+So the bot now notices, **before the model gets the turn**:
+
+    ⚠️ That looked like a password. I deleted your message.
+       [...] Treat it as exposed and change it.
+       You never need to send me one. When a machine needs credentials I ask
+       for them in a wizard, on a keypad, where nothing becomes a chat message.
+
+Deliberately in code rather than in a brief. It costs **zero tokens**, it runs
+on every message, and unlike an instruction to a model it cannot be talked out
+of firing. The message is deleted where the bot is allowed to; where it is not,
+the warning says so plainly instead of implying it is gone.
+
+**The text is scrubbed before it goes anywhere else.** That matters more than
+the warning: the message is kept for the "just answer" button, and forwarding a
+credential to a model while deleting it from the chat would look solved and not
+be. Only the secret is replaced -- the host, port and user survive, so the
+registration offer still works.
+
+Narrow on purpose. `password expiry policy`, `gimana cara reset password?` and
+`password manager mana yang bagus` are questions, not disclosures, and a warning
+that interrupts conversations is one people learn to dismiss. The pattern needs
+a keyword, a word boundary, and something actually assigned after it.
+
+**A miscount in the runner, found by not trusting the number.** Sixteen new
+tests were added and the total did not move: `run_all` read the FIRST
+`N/M passed` line, and the suite had grown a second summary block. It now takes
+the last tally -- and had a check above that first block failed, its
+`sys.exit(1)` would have stopped the file before the later tests ran at all.
+
+**A merge-conflict guard**, after committing `CHANGELOG.md` with `<<<<<<<`
+markers still in it in the iPandu fork: the resolution script died on an
+encoding error and the `git add -A && git commit` behind it ran anyway. Nothing
+caught it, because the version check still parsed.
+
+885/885 across 39 suites.
+
 ## v0.2b.78 -- the bot notices a machine it has never heard of
 
 Asking the agent to fix something on an unregistered host used to go one of two

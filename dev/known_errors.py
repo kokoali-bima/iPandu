@@ -181,4 +181,20 @@ ERRORS = [
         "guard": "test_capabilities_brief.py",
         "release": "v0.2b.77",
     },
+    {
+        "id": "E012",
+        "date": "2026-09-06",
+        "area": "Dev tooling",
+        "symptom": "run_all reported test_newhost_offer.py at 25/25 while running "
+                   "it directly gave 41/41. Sixteen checks were uncounted.",
+        "cause": "The suite had grown a SECOND summary block when tests were "
+                 "appended after an existing one, and run_all read the FIRST "
+                 "'N/M passed' line it found. Worse than miscounting: had a "
+                 "check above that first block failed, its sys.exit(1) would "
+                 "have stopped the file before the later tests ran at all.",
+        "fix": "run_all takes the LAST tally, which is what 'the result' means; "
+               "any earlier line is a partial. Duplicate summary removed.",
+        "guard": "test_run_all.py",
+        "release": "v0.2b.79",
+    },
 ]
