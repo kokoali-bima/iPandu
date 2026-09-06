@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.2b.77 -- the brief never mentioned the write gate
+
+Registering a Proxmox went smoothly on Gemini and badly on Sonnet. That reads
+like a model problem. The logs say otherwise.
+
+Across 36 hours on that host there were **two** write-mode mentions, one of them
+the Gemini unlock that worked. Sonnet never emitted `NEEDS_WRITE:` at all. It
+ran into `pve-ro-guard: refused`, treated it as a fault to route around, and
+spent ten turns doing that. There were **zero application errors** in the same
+window -- the six logged were `telegram.error.NetworkError: Bad Gateway`, a
+14-second Telegram outage the bot rode through, with no line touching
+`lite_agent.py`.
+
+`CAPABILITIES_BRIEF` -- added in v0.2b.73 so capabilities ship with the code
+rather than with the install -- covered media and Drive markers and said
+**nothing** about the write gate. Not `NEEDS_WRITE`, not the guard, not
+`/addserver`. Sonnet was not being difficult; it had not been told.
+
+It now covers both:
+
+- **Asking for write access.** The read-only key and the guard on the far side
+  are normal, not a fault. Do not retry, do not hunt for a command that slips
+  past, do not tell the operator their key is broken -- emit
+  `NEEDS_WRITE: <what>` and let the PIN prompt do its job.
+- **Adding a server.** Do not improvise a registration: no editing
+  `~/.ssh/config`, no appending to `authorized_keys`, no asking for a password.
+  Tell the operator to run `/addserver`. The wizard is deterministic and
+  **never involves the model at all** -- it runs before the model is called --
+  so anything assembled by hand instead is strictly worse.
+
+The brief grows from ~445 to ~709 tokens, paid once per conversation. That is
+the cost of removing model variance from the most consequential operation this
+bot performs.
+
+844/844 across 38 suites.
+
 ## v0.2b.76 -- the whole class, not the three that fired
 
 v0.2b.75 fixed three crashes that shared one shape: code reached for

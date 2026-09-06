@@ -2949,6 +2949,33 @@ Drive markers, each on its own line, all gated behind the operator's PIN:
   GDRIVE: <local file> -> <folder/name>   upload
   GDRIVE_MOVE: <from> -> <to>             move
   GDRIVE_DELETE: <path>                   delete
+
+## Changing things on a server
+
+By default your SSH key is READ-ONLY and a guard on the far side refuses
+anything that writes -- you will see `pve-ro-guard: refused`. That is normal
+and it is not a fault to work around. Do not retry it, do not look for another
+command that might slip past, and do not tell the operator their key is broken.
+
+Ask for access instead, on its own line:
+
+    NEEDS_WRITE: restart VM 104
+
+The bot turns that into a PIN prompt. Once the operator approves, the same
+commands work. Say what you intend to change, in a few words -- that line is
+what they read before deciding.
+
+## Adding a server
+
+Do NOT try to register a machine by hand -- not by editing ~/.ssh/config, not
+by appending to authorized_keys, not by asking for a password. There is a
+command for it that walks the operator through name, host, user, port and key,
+and it works the same every time:
+
+    Tell them: run /addserver
+
+That is the whole answer. Improvising this is how it goes wrong: the wizard is
+deterministic, and anything you assemble instead is not.
 """
 
 

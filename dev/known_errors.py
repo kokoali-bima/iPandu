@@ -163,4 +163,22 @@ ERRORS = [
         "guard": "test_gdrive_rclone_auth.py",
         "release": "v0.2b.75",
     },
+    {
+        "id": "E011",
+        "date": "2026-09-06",
+        "area": "Model brief",
+        "symptom": "Registering the dk-solutions Proxmox went fine on Gemini and "
+                   "was painful on Sonnet -- ten turns of going in circles.",
+        "cause": "CAPABILITIES_BRIEF covered media and Drive but said nothing "
+                 "about the write gate or /addserver. Across 36 hours of logs "
+                 "there were only two write-mode mentions: Sonnet never emitted "
+                 "NEEDS_WRITE at all. It hit `pve-ro-guard: refused`, read it as "
+                 "a fault to work around, and never asked for the PIN. Not a "
+                 "crash -- zero application errors in that window.",
+        "fix": "The brief now explains the read-only guard, the NEEDS_WRITE line "
+               "that asks for access, and that adding a server means telling the "
+               "operator to run /addserver rather than improvising.",
+        "guard": "test_capabilities_brief.py",
+        "release": "v0.2b.77",
+    },
 ]
