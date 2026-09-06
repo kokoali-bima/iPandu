@@ -32,6 +32,7 @@ model_overrides.json
 chat_language.json
 gdrive_room_accounts.json
 gdrive_oauth_client.json
+gdrive_oauth_client_desktop.json
 .*.service.bak
 /incoming/
 /bin/

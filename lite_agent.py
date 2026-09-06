@@ -200,6 +200,17 @@ GDRIVE_ROOM_ACCOUNTS_FILE = BASE_DIR / "gdrive_room_accounts.json"
 # whole deployment -- each person still authorises their OWN Google account
 # through it.
 GDRIVE_CLIENT_FILE = BASE_DIR / "gdrive_oauth_client.json"
+# A SECOND client, and it has to be second rather than shared. Google ties the
+# grant type to the client TYPE:
+#
+#   device flow (/connectgdrive, the default)  -> "TV and Limited Input devices"
+#   rclone authorize (/connectgdrive manual)   -> "Desktop app", loopback redirect
+#
+# A TV client supports no redirect at all, so pointing `rclone authorize` at
+# one gets "Error 400: invalid_request" from Google before the consent screen
+# is ever drawn. Reusing the stored client for both paths was tried on a live
+# deployment and failed exactly there.
+GDRIVE_DESKTOP_CLIENT_FILE = BASE_DIR / "gdrive_oauth_client_desktop.json"
 GDRIVE_DEVICE_CODE_URL = "https://oauth2.googleapis.com/device/code"
 GDRIVE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 # Verified against Google's own documentation before being chosen: the device
@@ -5739,8 +5750,17 @@ async def _handle_gdrive_wizard_input(update: Update, context: ContextTypes.DEFA
             ), parse_mode="HTML")
             return True
         parts = [state["client_id"], secret]
-        write_gdrive_client(parts[0], parts[1])
+        desktop = bool(state.get("desktop"))
+        write_gdrive_client(parts[0], parts[1], desktop=desktop)
         state["expires"] = _dt.datetime.now().timestamp() + GDRIVE_TOKEN_WIZARD_TTL
+        if desktop:
+            # The desktop client is only useful to `rclone authorize`, so go
+            # straight there rather than starting a device flow it cannot
+            # serve. The instructions now print the command carrying it.
+            state["step"] = "await_gdrive_token"
+            await update.message.reply_text(
+                _gdrive_connect_instructions(lang, state["name"]), parse_mode="HTML")
+            return True
         await _gdrive_begin_device(update, context, lang, state["name"])
         return True
 
@@ -5802,7 +5822,7 @@ async def _handle_gdrive_wizard_input(update: Update, context: ContextTypes.DEFA
         # mainly shared drives: drive.file cannot touch one at all.
         ok, detail = await loop.run_in_executor(
             None, connect_gdrive_account, name, text,
-            read_gdrive_client() or None, "drive")
+            read_gdrive_desktop_client() or None, "drive")
     except Exception as exc:
         logger.exception("gdrive connect failed")
         ok, detail = False, str(exc)
@@ -7650,6 +7670,50 @@ def _sanitize_gdrive_label(label: str) -> str:
     return f"gdrive_{cleaned}"[:60] if cleaned else ""
 
 
+def _gdrive_desktop_client_setup_instructions(lang: str) -> str:
+    """The OTHER OAuth client: a Desktop app one, for `rclone authorize`.
+
+    Same Google Cloud project, same Drive API, same consent screen as the
+    device-flow client -- only the type differs, and the type is what Google
+    binds the grant to. Sending someone back through the TV-client card here
+    reproduces "Error 400: invalid_request", which is where this came from.
+    """
+    return _t(lang,
+        "🔑 <b>One-time: a Desktop app OAuth client</b>\n\n"
+        "This is a SECOND client, alongside the one the normal sign-in uses. "
+        "Google ties the grant type to the client type: the device flow needs "
+        "a <i>TV and Limited Input devices</i> client, and "
+        "<code>rclone authorize</code> needs a <i>Desktop app</i> one. A TV "
+        "client supports no redirect, so Google answers "
+        "<code>Error 400: invalid_request</code> before showing the consent "
+        "screen.\n\n"
+        "1. Open <code>https://console.cloud.google.com/apis/credentials</code>\n"
+        "2. Use the <b>same project</b> as before — the Drive API and consent "
+        "screen are already set up there\n"
+        "3. <b>Create credentials → OAuth client ID</b>\n"
+        "4. Application type: <b>Desktop app</b>\n\n"
+        "Then send both values here as one message, separated by a space:\n"
+        "<code>&lt;client_id&gt; &lt;client_secret&gt;</code>\n\n"
+        "Send /cancel to stop.",
+
+        "🔑 <b>Sekali saja: OAuth client tipe Desktop app</b>\n\n"
+        "Ini client KEDUA, berdampingan dengan yang dipakai sign-in biasa. "
+        "Google mengikat jenis grant pada tipe client: device flow butuh "
+        "client <i>TV and Limited Input devices</i>, sedangkan "
+        "<code>rclone authorize</code> butuh <i>Desktop app</i>. Client TV "
+        "tidak mendukung redirect sama sekali, jadi Google menjawab "
+        "<code>Error 400: invalid_request</code> sebelum halaman izin muncul.\n\n"
+        "1. Buka <code>https://console.cloud.google.com/apis/credentials</code>\n"
+        "2. Pakai <b>project yang sama</b> — Drive API dan consent screen-nya "
+        "sudah siap di sana\n"
+        "3. <b>Create credentials → OAuth client ID</b>\n"
+        "4. Application type: <b>Desktop app</b>\n\n"
+        "Lalu kirim kedua nilainya di sini dalam satu pesan, dipisah spasi:\n"
+        "<code>&lt;client_id&gt; &lt;client_secret&gt;</code>\n\n"
+        "Kirim /cancel untuk berhenti.",
+    )
+
+
 def _gdrive_authorize_command() -> str:
     """The exact `rclone authorize` to run, given what this deployment has.
 
@@ -7668,7 +7732,7 @@ def _gdrive_authorize_command() -> str:
       one -- the instruction given determines what gets stored, rather than
       the bot guessing about a token it did not see issued.
     """
-    client = read_gdrive_client()
+    client = read_gdrive_desktop_client()
     if client.get("client_id"):
         return (f"rclone authorize drive --drive-scope drive "
                 f"\"{client['client_id']}\" \"{client.get('client_secret', '')}\"")
@@ -7677,7 +7741,7 @@ def _gdrive_authorize_command() -> str:
 
 def _gdrive_connect_instructions(lang: str, name: str) -> str:
     cmd = _gdrive_authorize_command()
-    own = bool(read_gdrive_client().get("client_id"))
+    own = bool(read_gdrive_desktop_client().get("client_id"))
     note_en = (
         "\n\n<i>That command carries YOUR OAuth client, so the account it "
         "creates refreshes through your own project — not rclone's shared "
@@ -7686,7 +7750,9 @@ def _gdrive_connect_instructions(lang: str, name: str) -> str:
         "\n\n<i>No OAuth client of your own is set up, so this will use "
         "rclone's shared one — which is being retired during 2026, and whose "
         "quota is already exhausted often enough to fail uploads. Run "
-        "/connectgdrive setupclient first if you can.</i>")
+        "/connectgdrive setupclient desktop first -- it must be a "
+        "<b>Desktop app</b> client, since the TV client the device flow uses "
+        "supports no redirect and Google rejects it here.</i>")
     note_id = (
         "\n\n<i>Perintah itu membawa OAuth client MILIK ANDA, jadi akun yang "
         "dibuat me-refresh lewat project Anda sendiri — bukan client bersama "
@@ -7695,7 +7761,9 @@ def _gdrive_connect_instructions(lang: str, name: str) -> str:
         "\n\n<i>Belum ada OAuth client milik Anda, jadi ini akan memakai milik "
         "rclone yang dipakai bersama — dipensiunkan selama 2026, dan kuotanya "
         "sudah cukup sering habis sampai menggagalkan upload. Jalankan "
-        "/connectgdrive setupclient dulu kalau bisa.</i>")
+        "/connectgdrive setupclient desktop dulu -- harus client tipe "
+        "<b>Desktop app</b>, karena client TV yang dipakai device flow tidak "
+        "mendukung redirect dan ditolak Google di sini.</i>")
     return _gdrive_connect_body(lang, name, cmd, note_en, note_id)
 
 
@@ -7788,13 +7856,21 @@ async def cmd_connectgdrive(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # own-client path is the one that survives. Leaving it unreachable would
     # have meant discovering that only when uploads started failing.
     if arg in ("setupclient", "client", "ownclient"):
+        # `setupclient desktop` stores the OTHER client -- the Desktop-app one
+        # `rclone authorize` needs. Google ties the grant type to the client
+        # type, so the TV client the device flow requires supports no redirect
+        # and is rejected outright on the loopback path.
+        second = (context.args[1].strip().lower() if len(context.args) > 1 else "")
+        desktop = second in ("desktop", "manual", "rclone")
         _gdrive_wizard[chat_id] = {
             "step": "await_gdrive_client",
+            "desktop": desktop,
             "name": _next_gdrive_default_name() if _list_gdrive_accounts() else "gdrive",
             "expires": _dt.datetime.now().timestamp() + GDRIVE_TOKEN_WIZARD_TTL,
         }
         return await update.message.reply_text(
-            _gdrive_client_setup_instructions(lang), parse_mode="HTML")
+            _gdrive_desktop_client_setup_instructions(lang) if desktop
+            else _gdrive_client_setup_instructions(lang), parse_mode="HTML")
 
     existing = _list_gdrive_accounts()
     if manual:
@@ -8243,14 +8319,39 @@ def clear_gdrive_client() -> bool:
     return True
 
 
-def write_gdrive_client(client_id: str, client_secret: str) -> None:
-    GDRIVE_CLIENT_FILE.write_text(json.dumps(
+def write_gdrive_client(client_id: str, client_secret: str,
+                        desktop: bool = False) -> None:
+    """Store an OAuth client. `desktop=True` keeps it in the separate file the
+    loopback (`rclone authorize`) path uses -- see GDRIVE_DESKTOP_CLIENT_FILE
+    for why one client cannot serve both grant types."""
+    path = GDRIVE_DESKTOP_CLIENT_FILE if desktop else GDRIVE_CLIENT_FILE
+    path.write_text(json.dumps(
         {"client_id": client_id.strip(), "client_secret": client_secret.strip()}, indent=2))
     try:
-        GDRIVE_CLIENT_FILE.chmod(0o600)
+        path.chmod(0o600)
     except OSError:
         logger.warning("could not chmod the Drive client file", exc_info=True)
-    logger.warning("Drive OAuth client configured (%s)", client_id[:24])
+    logger.warning("Drive OAuth client configured (%s%s)",
+                   "desktop: " if desktop else "", client_id[:24])
+
+
+def read_gdrive_desktop_client() -> dict:
+    """The Desktop-app client `rclone authorize` needs, or {} when unset.
+
+    Deliberately NOT falling back to the device-flow client: that one is a "TV
+    and Limited Input devices" client, which supports no redirect at all, so
+    handing it to `rclone authorize` produces Google's "Error 400:
+    invalid_request" before the consent screen appears. A fallback here would
+    turn a clear "not set up yet" into that.
+    """
+    if not GDRIVE_DESKTOP_CLIENT_FILE.exists():
+        return {}
+    try:
+        d = json.loads(GDRIVE_DESKTOP_CLIENT_FILE.read_text())
+        return d if d.get("client_id") else {}
+    except Exception:
+        logger.warning("gdrive_oauth_client_desktop.json unreadable", exc_info=True)
+        return {}
 
 
 def _post_form(url: str, fields: dict) -> tuple[int, dict]:

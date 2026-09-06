@@ -154,7 +154,12 @@ connect_calls = [ast.unparse(n) for n in ast.walk(tree)
                  if isinstance(n, ast.Call)
                  and "connect_gdrive_account" in ast.unparse(n)
                  and "disconnect" not in ast.unparse(n)]
-with_client = [c for c in connect_calls if "read_gdrive_client" in c]
+# Either reader counts: read_gdrive_client() is the device flow's TV client,
+# read_gdrive_desktop_client() the Desktop-app one `rclone authorize` needs.
+# They are separate files because Google binds the grant type to the client
+# type -- a TV client has no redirect, so the loopback path is refused outright.
+with_client = [c for c in connect_calls
+               if "read_gdrive_client" in c or "read_gdrive_desktop_client" in c]
 # The rule is not "one call site" but "only a call site that KNOWS which client
 # issued this token". That was one site while the device flow was the only path
 # with a client of its own. The manual paste-a-token path joined it once the

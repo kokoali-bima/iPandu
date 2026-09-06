@@ -18,6 +18,29 @@
      that gap, but that is the maintainer's call, not something a contributing
      branch should decide by editing a check written one release ago. -->
 
+## Unreleased -- two OAuth clients, because Google binds the grant to the type
+
+The previous entry said the manual path could reuse the operator's stored
+OAuth client. It cannot, and the live attempt said so:
+
+    Access blocked: <app> request is invalid
+    Error 400: invalid_request
+
+Google ties the grant type to the CLIENT type. The device flow needs a
+*TV and Limited Input devices* client; `rclone authorize` uses a loopback
+redirect and needs a *Desktop app* one. A TV client supports no redirect at
+all, so the loopback path is refused before the consent screen is drawn.
+
+So there are two clients now, in two files, with no fallback between them --
+falling back would turn a clear "not set up yet" into that same 400.
+`/connectgdrive setupclient desktop` stores the second one; the card explains
+it is the same Google Cloud project, so the Drive API and consent screen do not
+have to be set up twice. Supplying it leads straight to the
+`rclone authorize` instructions rather than a device flow it cannot serve.
+
+`gdrive_oauth_client_desktop.json` was added to `.gitignore` in the same
+change. Its sibling was already there, and this one holds a credential too.
+
 ## Unreleased -- the manual Drive path can reach a shared drive, and survive 2026
 
 Correcting something this CHANGELOG implied one entry ago. `drive.file` does
