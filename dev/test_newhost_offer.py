@@ -249,6 +249,58 @@ check("downstream uses the scrubbed text, not the raw message",
       "safe_text = scrub_password(msg.text)" in src2
       and "unregistered_hosts_in(safe_text)" in src2)
 
+
+# --- can the bot clean up in THIS room? -----------------------------------
+# Asked before a credential is invited, never after: finding out the bot cannot
+# delete once the password is already on screen is finding out too late.
+# Telegram grants bots deletion of incoming messages in private chats; in a
+# group it needs the can_delete_messages admin right specifically, which is
+# separate from adding or removing members.
+async def perms():
+    def upd(chat_type, member=None):
+        async def get_chat_member(chat_id, user_id):
+            if member is None:
+                raise RuntimeError("cannot read membership")
+            return member
+        ctx = SimpleNamespace(bot=SimpleNamespace(id=1,
+                                                  get_chat_member=get_chat_member))
+        u = SimpleNamespace(effective_chat=SimpleNamespace(id=5, type=chat_type))
+        return u, ctx
+
+    u, c = upd("private")
+    check("in a DM the bot may delete the message", await mod.bot_can_delete_here(u, c))
+
+    u, c = upd("supergroup", SimpleNamespace(status="administrator",
+                                             can_delete_messages=True))
+    check("in a group WITH the delete right, it may", await mod.bot_can_delete_here(u, c))
+
+    u, c = upd("supergroup", SimpleNamespace(status="administrator",
+                                             can_delete_messages=False))
+    check("admin WITHOUT the delete right is not enough",
+          not await mod.bot_can_delete_here(u, c))
+
+    u, c = upd("supergroup", SimpleNamespace(status="member",
+                                             can_delete_messages=None))
+    check("a plain member cannot", not await mod.bot_can_delete_here(u, c))
+
+    u, c = upd("supergroup", None)
+    check("if the membership cannot even be read, assume it cannot",
+          not await mod.bot_can_delete_here(u, c))
+
+
+asyncio.run(perms())
+
+src3 = Path(SRC).read_text(encoding="utf-8")
+# The source wraps that phrase across two lines, so match the halves.
+check("the group message names the exact right needed",
+      "Delete " in src3 and "messages</b> only" in src3
+      and "Hapus pesan" in src3)
+check("...and says the add/remove-member right is NOT needed",
+      "add or remove members" in src3 and "mengeluarkan anggota" in src3)
+gate = src3.index("await bot_can_delete_here(update, context)")
+check("permission is checked BEFORE attempting the delete",
+      gate < src3.index("await msg.delete()", gate))
+
 failed = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed")
 if failed:

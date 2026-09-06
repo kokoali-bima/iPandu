@@ -1403,6 +1403,40 @@ def mentions_password(text: str) -> Optional[str]:
     return secret
 
 
+async def bot_can_delete_here(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Can the bot remove someone else's message in THIS chat?
+
+    Private chat: yes. Telegram grants bots that specifically -- "Bots can
+    delete incoming messages in private chats" -- which is why the Drive OAuth
+    flow has been able to clear a pasted token since it was written.
+
+    Group or supergroup: only as an administrator holding can_delete_messages.
+    That right does NOT come with being added to a group, and it is separate
+    from the ability to add or remove members -- so a room can grant exactly
+    this and nothing more.
+
+    Asked before a credential is invited, never after. Discovering the bot
+    cannot clean up once the password is already on screen is discovering it
+    too late.
+    """
+    chat = update.effective_chat
+    if chat is None:
+        return False
+    if chat.type == "private":
+        return True
+    try:
+        me = await context.bot.get_chat_member(chat.id, context.bot.id)
+    except Exception:
+        logger.info("could not read the bot's own membership in %s", chat.id,
+                    exc_info=True)
+        return False
+    if getattr(me, "status", "") != "administrator":
+        return False
+    # can_delete_messages is None for a non-admin and may be absent on older
+    # PTB shapes; treat anything but an explicit True as "no".
+    return getattr(me, "can_delete_messages", False) is True
+
+
 def scrub_password(text: str) -> str:
     """The same message with the credential replaced.
 
@@ -1425,11 +1459,25 @@ async def warn_password_in_chat(update: Update, deleted: bool) -> None:
     obvious unless someone says it once, plainly.
     """
     lang = _chat_lang(update)
-    gone = _t(lang,
-              "I deleted your message.",
-              "Pesan Anda sudah saya hapus.") if deleted else _t(lang,
-              "I could not delete your message — please delete it yourself.",
-              "Pesan Anda tidak bisa saya hapus — tolong hapus sendiri.")
+    in_group = getattr(update.effective_chat, "type", "private") != "private"
+    if deleted:
+        gone = _t(lang, "I deleted your message.",
+                        "Pesan Anda sudah saya hapus.")
+    elif in_group:
+        # Name the exact right, and name what is NOT needed. "Make the bot an
+        # admin" reads like handing over the room; the only thing required here
+        # is deleting messages.
+        gone = _t(lang,
+                  "I could not delete it — please delete it yourself. To let me "
+                  "clean these up here, make me an admin with <b>Delete "
+                  "messages</b> only; I do not need to add or remove members.",
+                  "Saya tidak bisa menghapusnya — tolong hapus sendiri. Supaya "
+                  "saya bisa membersihkannya di sini, jadikan saya admin dengan "
+                  "izin <b>Hapus pesan</b> saja; saya tidak butuh izin menambah "
+                  "atau mengeluarkan anggota.")
+    else:
+        gone = _t(lang, "I could not delete your message — please delete it yourself.",
+                        "Pesan Anda tidak bisa saya hapus — tolong hapus sendiri.")
     await _msg(update).reply_text(
         _t(lang,
            f"⚠️ <b>That looked like a password.</b> {gone}\n\n"
@@ -10098,13 +10146,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # talked out of firing.
         if mentions_password(msg.text):
             deleted = False
-            try:
-                await msg.delete()
-                deleted = True
-            except Exception:
-                # Bots cannot always delete someone else's message. Say so
-                # rather than implying it is gone when it is not.
-                logger.warning("could not delete a message containing a credential")
+            if await bot_can_delete_here(update, context):
+                try:
+                    await msg.delete()
+                    deleted = True
+                except Exception:
+                    # Rights can be right and the call still fail -- the 48-hour
+                    # limit, a race with the user deleting it first. Say so
+                    # rather than implying it is gone when it is not.
+                    logger.warning("could not delete a message containing a credential")
+            else:
+                logger.warning("no permission to delete a credential in chat=%s",
+                               update.effective_chat.id)
             await warn_password_in_chat(update, deleted)
 
         # From here on, work with the SCRUBBED text: the credential must not
