@@ -155,11 +155,26 @@ connect_calls = [ast.unparse(n) for n in ast.walk(tree)
                  and "connect_gdrive_account" in ast.unparse(n)
                  and "disconnect" not in ast.unparse(n)]
 with_client = [c for c in connect_calls if "read_gdrive_client" in c]
-check("exactly one call site passes a client -- the device flow, the only one "
-      "that knows which client issued the token",
-      len(with_client) == 1)
-check("...and it is the one handling the device-flow token",
-      bool(with_client) and "gdrive_token_to_rclone" in with_client[0])
+# The rule is not "one call site" but "only a call site that KNOWS which client
+# issued this token". That was one site while the device flow was the only path
+# with a client of its own. The manual paste-a-token path joined it once the
+# bot began PRINTING the `rclone authorize` command -- when that command
+# carries the operator's client_id, the token that comes back was issued by it,
+# and the bot knows so because it wrote the instruction.
+#
+# Still excluded, and this is the case the rule exists for: the rclone-authorize
+# path, whose token comes from rclone's OWN published client. Attaching the
+# operator's client_id there would break the account immediately, since a
+# refresh token is bound to its issuer.
+check("only call sites that know the issuing client pass one -- two of them now",
+      len(with_client) == 2)
+check("...the device-flow token handler",
+      any("gdrive_token_to_rclone" in c for c in with_client))
+check("...and the manual paste, which is told to authorize through that client",
+      any("'drive'" in c or '"drive"' in c for c in with_client))
+check("the rclone-authorize path still passes NO client, because rclone's own "
+      "published one issued that token",
+      any("read_gdrive_client" not in c for c in connect_calls))
 check("connect_gdrive_account does not read the client itself, which would "
       "attach it to tokens from other clients too",
       "read_gdrive_client" not in func_src("connect_gdrive_account"))

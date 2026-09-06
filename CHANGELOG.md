@@ -18,6 +18,50 @@
      that gap, but that is the maintainer's call, not something a contributing
      branch should decide by editing a check written one release ago. -->
 
+## Unreleased -- the manual Drive path can reach a shared drive, and survive 2026
+
+Correcting something this CHANGELOG implied one entry ago. `drive.file` does
+not merely limit what a shared drive shows — it cannot touch one **at all**:
+
+    ERROR: failed to get Shared Drive info: googleapi: Error 403:
+    Request had insufficient authentication scopes
+    method: google.apps.drive.v3.DriveDrives.Get
+
+rclone resolves `team_drive` through `Drives.Get`, which Google refuses under
+`drive.file`. Setting a shared drive on such a remote does not restrict it, it
+**breaks** it — My Drive uploads included — until `team_drive` is cleared.
+
+Reaching a shared drive therefore needs a full `drive` token, and Google's
+device flow will not issue one: of the Drive scopes it supports, only
+`drive.appdata` and `drive.file` are on the list. That is what
+`/connectgdrive manual` has always been for. But it hardcoded `drive.file` and
+attached no OAuth client, so it could not do the job it existed for, and put
+the account back on rclone's shared client — the very thing being retired in
+2026, and already failing uploads on exhausted quota.
+
+Now:
+
+- `connect_gdrive_account()` takes a `scope`, still defaulting to `drive.file`.
+  Stating it is the caller's job: writing a scope the token does not carry does
+  not widen it, it makes the remote lie about itself.
+- The manual path asks for `drive` and attaches the operator's stored OAuth
+  client.
+- It may attach it because it now knows: `_gdrive_authorize_command()` prints
+  the `rclone authorize` line, and when a client is stored that line carries
+  it. The token that comes back was issued by that client because the bot said
+  so. When none is stored, nothing is attached and the instructions warn about
+  the shared client instead, naming `/connectgdrive setupclient`.
+
+A refresh token is bound to its issuing client, so attaching the wrong one
+breaks an account immediately rather than postponing anything. Two existing
+suites guarded that, and both had to be updated rather than loosened:
+`test_gdrive_client_id.py` asserted exactly ONE call site may pass a client —
+the real rule is "only a site that knows the issuer", which is now two, with
+the rclone-authorize path still correctly passing none; and
+`test_gdrive_device_flow.py` asserted the literal `scope=drive.file` appears in
+the source, which moved into a default, so it now checks the default and that
+the device-flow call site does not override it.
+
 ## Unreleased -- /gdrivetarget: a shared drive is a different root
 
 A report was sent "to the shared drive TIPD". The remote had no `team_drive`,

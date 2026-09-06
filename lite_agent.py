@@ -5789,7 +5789,20 @@ async def _handle_gdrive_wizard_input(update: Update, context: ContextTypes.DEFA
         f"\u23f3 Menghubungkan dan memverifikasi \u2018{_tg_escape(name)}\u2019\u2026"))
     loop = asyncio.get_running_loop()
     try:
-        ok, detail = await loop.run_in_executor(None, connect_gdrive_account, name, text)
+        # Full drive, and the operator's own OAuth client when there is one.
+        # Both follow from the command _gdrive_authorize_command() just told
+        # them to run: it asks for --drive-scope drive, and it passes their
+        # client_id when one is stored. A refresh token is bound to the client
+        # that issued it, so attaching the wrong one breaks the account rather
+        # than postponing anything -- which is why this is keyed to the
+        # instruction given, not to a guess about a token nobody watched being
+        # issued.
+        #
+        # This path exists for what the device flow cannot reach, and that is
+        # mainly shared drives: drive.file cannot touch one at all.
+        ok, detail = await loop.run_in_executor(
+            None, connect_gdrive_account, name, text,
+            read_gdrive_client() or None, "drive")
     except Exception as exc:
         logger.exception("gdrive connect failed")
         ok, detail = False, str(exc)
@@ -7637,7 +7650,57 @@ def _sanitize_gdrive_label(label: str) -> str:
     return f"gdrive_{cleaned}"[:60] if cleaned else ""
 
 
+def _gdrive_authorize_command() -> str:
+    """The exact `rclone authorize` to run, given what this deployment has.
+
+    Two things vary, and both matter:
+
+    * Scope. This path exists for what the device flow cannot issue -- and
+      chiefly that is SHARED DRIVES. drive.file cannot touch one at all:
+      rclone resolves team_drive via Drives.Get, which Google refuses under
+      drive.file with "insufficient authentication scopes", breaking the whole
+      remote rather than just limiting it. So this asks for full drive.
+
+    * Whose OAuth client issues it. A refresh token is bound to the client
+      that issued it, so the remote must store THAT client or the refresh has
+      nowhere to go. Printing the operator's own client here is what lets
+      connect_gdrive_account() attach it afterwards and know it is the right
+      one -- the instruction given determines what gets stored, rather than
+      the bot guessing about a token it did not see issued.
+    """
+    client = read_gdrive_client()
+    if client.get("client_id"):
+        return (f"rclone authorize drive --drive-scope drive "
+                f"\"{client['client_id']}\" \"{client.get('client_secret', '')}\"")
+    return "rclone authorize drive --drive-scope drive"
+
+
 def _gdrive_connect_instructions(lang: str, name: str) -> str:
+    cmd = _gdrive_authorize_command()
+    own = bool(read_gdrive_client().get("client_id"))
+    note_en = (
+        "\n\n<i>That command carries YOUR OAuth client, so the account it "
+        "creates refreshes through your own project — not rclone's shared "
+        "client, which is being retired during 2026.</i>"
+        if own else
+        "\n\n<i>No OAuth client of your own is set up, so this will use "
+        "rclone's shared one — which is being retired during 2026, and whose "
+        "quota is already exhausted often enough to fail uploads. Run "
+        "/connectgdrive setupclient first if you can.</i>")
+    note_id = (
+        "\n\n<i>Perintah itu membawa OAuth client MILIK ANDA, jadi akun yang "
+        "dibuat me-refresh lewat project Anda sendiri — bukan client bersama "
+        "milik rclone yang dipensiunkan selama 2026.</i>"
+        if own else
+        "\n\n<i>Belum ada OAuth client milik Anda, jadi ini akan memakai milik "
+        "rclone yang dipakai bersama — dipensiunkan selama 2026, dan kuotanya "
+        "sudah cukup sering habis sampai menggagalkan upload. Jalankan "
+        "/connectgdrive setupclient dulu kalau bisa.</i>")
+    return _gdrive_connect_body(lang, name, cmd, note_en, note_id)
+
+
+def _gdrive_connect_body(lang: str, name: str, cmd: str,
+                         note_en: str, note_id: str) -> str:
     return _t(lang,
         f"\U0001f511 <b>Connecting ‘{_tg_escape(name)}’</b>\n\n"
         "Google's OAuth for Drive needs a redirect back to a browser on the SAME "
@@ -7645,11 +7708,11 @@ def _gdrive_connect_instructions(lang: str, name: str) -> str:
         "single link that works from any device, so this one step has to happen on a "
         "machine you control that has <code>rclone</code> and a browser (your laptop, "
         "not necessarily this server):\n\n"
-        f"<pre>rclone authorize drive --drive-scope drive.file</pre>\n\n"
+        f"<pre>{_tg_escape(cmd)}</pre>\n\n"
         "Approve in the browser that opens. rclone will then print a block starting "
         "with <code>{\"access_token\"...}</code> -- copy that whole line and paste it "
         "here as your next message. I'll delete it immediately after reading it, same "
-        "as an OAuth code.\n\nSend /cancel to stop.",
+        "as an OAuth code." + note_en + "\n\nSend /cancel to stop.",
 
         f"\U0001f511 <b>Menghubungkan ‘{_tg_escape(name)}’</b>\n\n"
         "OAuth Google untuk Drive butuh redirect balik ke browser di mesin YANG SAMA "
@@ -7657,11 +7720,11 @@ def _gdrive_connect_instructions(lang: str, name: str) -> str:
         "link bisa dibuka dari perangkat mana pun, jadi langkah ini harus dilakukan di "
         "mesin yang kamu kuasai dan punya <code>rclone</code> + browser (laptop kamu, "
         "tidak harus server ini):\n\n"
-        f"<pre>rclone authorize drive --drive-scope drive.file</pre>\n\n"
+        f"<pre>{_tg_escape(cmd)}</pre>\n\n"
         "Setujui di browser yang terbuka. rclone lalu mencetak satu blok diawali "
         "<code>{\"access_token\"...}</code> -- salin seluruh baris itu dan tempel di "
         "sini sebagai pesan berikutnya. Saya hapus segera setelah dibaca, sama seperti "
-        "kode OAuth.\n\nKirim /cancel untuk berhenti.",
+        "kode OAuth." + note_id + "\n\nKirim /cancel untuk berhenti.",
     )
 
 
@@ -8282,7 +8345,8 @@ def gdrive_token_to_rclone(tok: dict) -> str:
 
 
 def connect_gdrive_account(name: str, token_raw: str,
-                           oauth_client: Optional[dict] = None) -> tuple[bool, str]:
+                           oauth_client: Optional[dict] = None,
+                           scope: str = "drive.file") -> tuple[bool, str]:
     """Register a new rclone Drive remote from a pasted OAuth token, verify it
     actually works, and roll back cleanly on any failure.
 
@@ -8313,7 +8377,17 @@ def connect_gdrive_account(name: str, token_raw: str,
     # knows where its token came from. The device flow knows (its own client);
     # the rclone-authorize path and a hand-pasted blob do not, and correctly
     # pass nothing.
-    opts = ["scope=drive.file", f"token={token_raw}"]
+    # The scope is the caller's to state, because only the caller knows what
+    # the token was actually issued for -- and writing a scope the token does
+    # not carry does not widen it, it just makes the remote lie about itself.
+    #
+    # drive.file stays the default and is right for the device flow, but it
+    # cannot touch a SHARED DRIVE at all: rclone resolves team_drive through
+    # Drives.Get, and Google answers "Request had insufficient authentication
+    # scopes" for that call under drive.file. Not merely "can only see its own
+    # files" -- the remote fails outright, for My Drive uploads too, until
+    # team_drive is cleared again. Found the hard way on a live deployment.
+    opts = [f"scope={scope}", f"token={token_raw}"]
     if oauth_client and oauth_client.get("client_id"):
         opts += [f"client_id={oauth_client['client_id']}",
                  f"client_secret={oauth_client.get('client_secret', '')}"]
