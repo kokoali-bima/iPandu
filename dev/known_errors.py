@@ -294,4 +294,44 @@ ERRORS = [
         "guard": "test_release_consistency.py",
         "release": "v0.2b.86",
     },
+    {
+        "id": "E018",
+        "date": "2026-09-06",
+        "area": "Add server",
+        "symptom": "The operator placed a key on 10.10.59.75, saw the 'Key "
+                   "installed and verified' card, tapped the final button, and "
+                   "got 'That form expired'. The host never reached /servers.",
+        "cause": "The /addserver wizard lived only in memory with a 15-minute "
+                 "TTL. The service restarted for the v0.2b.86 /update while the "
+                 "wizard was open, wiping it. /unlock already persists its "
+                 "state across restarts for this exact reason; the server "
+                 "wizard did not.",
+        "fix": "The wizard is written to server_wizard.json after every step "
+               "and reloaded at startup, dropping any that expired while the "
+               "process was down. The password is never part of that state -- "
+               "it is a local, del'd the moment bootstrap returns -- so the "
+               "persistence adds no secret to disk. File is chmod 600 and "
+               "gitignored.",
+        "guard": "test_server_wizard_persist.py",
+        "release": "v0.2b.87",
+    },
+    {
+        "id": "E019",
+        "date": "2026-09-06",
+        "area": "Add server",
+        "symptom": "18,128 lines of journal and not one mention of "
+                   "10.10.59.75, though the wizard had demonstrably connected "
+                   "and placed a key there. Diagnosis needed reading "
+                   "~/.ssh/known_hosts by hand for a timestamp.",
+        "cause": "bootstrap_key_with_password had zero logger calls. Placing a "
+                 "credential on a machine -- the single most consequential "
+                 "thing the wizard does -- left no trace unless ssh itself "
+                 "errored, and even then only in the reply, not the log.",
+        "fix": "Five log points: placing the key, a refused password, an ssh "
+               "failure, a key that writes but will not authenticate (the "
+               ".75 shape -- an appliance that does not persist ~/.ssh), and a "
+               "verified success. None ever logs the password.",
+        "guard": "test_server_wizard_persist.py",
+        "release": "v0.2b.87",
+    },
 ]

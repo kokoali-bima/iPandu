@@ -1271,6 +1271,54 @@ SSH_CONFIG_BEGIN = "# BEGIN iSmart-LA managed -- edited by the bot, do not hand-
 SSH_CONFIG_END = "# END iSmart-LA managed"
 SERVER_WIZARD_TTL = 900
 _server_wizard: dict[int, dict] = {}
+SERVER_WIZARD_FILE = BASE_DIR / "server_wizard.json"
+
+
+def _save_server_wizard() -> None:
+    """Persist in-progress /addserver wizards so a restart -- an /update
+    mid-wizard is the usual one -- does not silently drop the form. NEVER holds
+    a password: the password is a local in _handle_server_input, del'd the
+    moment bootstrap returns, and is never written into wizard state."""
+    try:
+        data = {str(cid): st for cid, st in _server_wizard.items()}
+        SERVER_WIZARD_FILE.write_text(json.dumps(data), encoding="utf-8")
+        try:
+            SERVER_WIZARD_FILE.chmod(0o600)
+        except OSError:
+            pass
+    except (OSError, TypeError):
+        logger.warning("could not persist the server wizard", exc_info=True)
+
+
+def _load_server_wizard() -> None:
+    """Bring back wizards that were mid-flight when the process last stopped,
+    dropping any that expired while it was down. Called once at startup."""
+    if not SERVER_WIZARD_FILE.exists():
+        return
+    try:
+        raw = json.loads(SERVER_WIZARD_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.warning("server_wizard.json unreadable -- starting empty",
+                       exc_info=True)
+        SERVER_WIZARD_FILE.unlink(missing_ok=True)
+        return
+    now = _dt.datetime.now().timestamp()
+    restored = 0
+    for cid, st in (raw or {}).items():
+        if isinstance(st, dict) and st.get("expires", 0) > now:
+            _server_wizard[int(cid)] = st
+            restored += 1
+    if restored:
+        logger.info("restored %d in-progress /addserver wizard(s) after restart",
+                    restored)
+    _save_server_wizard()  # rewrite without the expired ones
+
+
+def _drop_server_wizard(chat_id: int):
+    """pop + persist, so a cancelled or finished wizard leaves nothing behind."""
+    st = _server_wizard.pop(chat_id, None)
+    _save_server_wizard()
+    return st
 
 SERVER_KINDS = {
     "hypervisor": "Hypervisor / cluster",
@@ -1908,7 +1956,9 @@ def bootstrap_key_with_password(host: str, user: str, port: int,
     password, and ssh's own stderr is filtered for anything that echoes it.
     """
     rw_pub_path = SSH_RW_KEY.with_suffix(".pub")
+    logger.info("bootstrap: placing write key on %s@%s:%s", user, host, port)
     if not rw_pub_path.exists():
+        logger.warning("bootstrap: no write key on this deployment -- aborting")
         return False, "no write key exists on this deployment yet"
     rw_pub = rw_pub_path.read_text().strip()
     if not rw_pub:
@@ -1954,7 +2004,10 @@ def bootstrap_key_with_password(host: str, user: str, port: int,
         if proc.returncode != 0:
             err = (proc.stderr or proc.stdout or "").strip()
             if "Permission denied" in err:
+                logger.warning("bootstrap: %s@%s:%s refused the password", user, host, port)
                 return False, "wrong password, or that user may not log in with one"
+            logger.warning("bootstrap: ssh to %s@%s:%s failed (rc=%s): %s",
+                           user, host, port, proc.returncode, err[-300:])
             return False, err[-300:] or "ssh failed with no message"
     finally:
         # Before anything else can read it, and whatever happened above.
@@ -1964,7 +2017,14 @@ def bootstrap_key_with_password(host: str, user: str, port: int,
     # of the picture entirely. That is the only evidence that matters.
     ok, detail = test_server_ssh(host, user, port, key_path=str(SSH_RW_KEY))
     if not ok:
+        # This is the 10.10.59.75 shape: the append succeeds and the key
+        # still does not authenticate -- an appliance that does not persist
+        # ~/.ssh, root key-login disabled, a wrong home. Say it in the log.
+        logger.warning("bootstrap: key written to %s@%s:%s but it does not "
+                       "authenticate yet: %s", user, host, port, detail)
         return False, ("the key was written but does not work yet: " + detail)
+    logger.info("bootstrap: key installed and verified on %s@%s:%s (%s)",
+                user, host, port, detail)
     return True, detail
 
 
@@ -6708,7 +6768,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         cancelled.append(_t(lang, "the Google Drive connect",
                                   "penghubungan Google Drive"))
 
-    if _server_wizard.pop(chat_id, None) is not None:
+    if _drop_server_wizard(chat_id) is not None:
         cancelled.append(_t(lang, "adding a server", "penambahan server"))
 
     if cancelled:
@@ -9283,6 +9343,7 @@ async def _begin_addserver(update: Update, query=None, prefill: Optional[dict] =
         "step": "kind", "data": dict(prefill or {}),
         "expires": _dt.datetime.now().timestamp() + SERVER_WIZARD_TTL,
     }
+    _save_server_wizard()
     lang = _chat_lang(update)
     kb = InlineKeyboardMarkup(
         [[InlineKeyboardButton(label, callback_data=f"srv:kind:{key}")]
@@ -9308,7 +9369,7 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await query.answer()
 
     if action == "cancel":
-        _server_wizard.pop(chat_id, None)
+        _drop_server_wizard(chat_id)
         await query.edit_message_text(_t(lang, "✖️ Cancelled. Nothing was saved.",
                                               "✖️ Dibatalkan. Tidak ada yang disimpan."))
         return
@@ -9324,6 +9385,7 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         data["kind"] = value
         if value == "hypervisor":
             state["step"] = "flavour"
+            _save_server_wizard()
             await query.edit_message_text(
                 _t(lang, "➕ <b>Add a server</b>\n\nWhich hypervisor?",
                          "➕ <b>Tambah server</b>\n\nHypervisor yang mana?"), parse_mode="HTML",
@@ -9335,18 +9397,21 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
         data["flavour"] = value
         state["step"] = "name"
+        _save_server_wizard()
         await query.edit_message_text(_srv_prompt("name", lang), parse_mode="HTML")
         return
 
     if action == "flavour":
         data["flavour"] = value
         state["step"] = "name"
+        _save_server_wizard()
         await query.edit_message_text(_srv_prompt("name", lang), parse_mode="HTML")
         return
 
     if action == "cluster":
         data["cluster_wide"] = (value == "yes")
         state["step"] = "discover"
+        _save_server_wizard()
         if data.get("flavour") != "proxmox":
             await _finish_addserver(update, query)
             return
@@ -9387,6 +9452,7 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         data["probe"] = data.get("probe") or "connected (unprotected)"
         if data.get("flavour") == "proxmox":
             state["step"] = "cluster"
+            _save_server_wizard()
             await query.edit_message_text(_t(lang,
                 "Added without protection. Does this same key reach every node?",
                 "Ditambahkan tanpa perlindungan. Apakah key yang sama menjangkau semua node?"),
@@ -9414,6 +9480,7 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 "mengeluarkan anggota."), parse_mode="HTML")
             return
         state["step"] = "password"
+        _save_server_wizard()
         await query.edit_message_text(_t(lang,
             f"🔐 Send the <b>{_tg_escape(data['user'])}</b> password for "
             f"<b>{_tg_escape(data['host'])}</b> as your next message.\n\n"
@@ -9487,6 +9554,7 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         data["probe"] = detail
         if data.get("flavour") == "proxmox":
             state["step"] = "cluster"
+            _save_server_wizard()
             await query.edit_message_text(
                 _t(lang,
                    f"✅ Connected. <code>{_tg_escape(detail)}</code>\n\n"
@@ -9563,7 +9631,7 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
             cleared = False
             logger.warning("could not delete the password message")
         if pw.strip().lower() in ("/cancel", "cancel", "batal"):
-            _server_wizard.pop(chat_id, None)
+            _drop_server_wizard(chat_id)
             await _msg(update).reply_text(_t(lang, "✖️ Cancelled. Nothing was saved.",
                                                    "✖️ Dibatalkan. Tidak ada yang disimpan."))
             return True
@@ -9581,6 +9649,7 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
         del pw          # not kept a moment longer than the call needs it
         if not ok:
             state["step"] = "authorize"
+            _save_server_wizard()
             await _msg(update).reply_text(_t(lang,
                 f"⚠️ That did not work: {_tg_escape(detail)}\n\n"
                 "Try the button again, or authorise the key by hand.",
@@ -9589,6 +9658,7 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
                 parse_mode="HTML")
             return True
         state["step"] = "authorize"
+        _save_server_wizard()
         await _msg(update).reply_text(_t(lang,
             f"✅ Key installed and verified on {_tg_escape(data['host'])} "
             f"({_tg_escape(detail)}).\n\n"
@@ -9604,14 +9674,14 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
     if not state or state["step"] not in ("name", "host", "user", "port"):
         return False
     if state["expires"] < _dt.datetime.now().timestamp():
-        _server_wizard.pop(chat_id, None)
+        _drop_server_wizard(chat_id)
         await _msg(update).reply_text(_t(lang, "⌛ That form expired. Run /addserver again.",
                                               "⌛ Form itu sudah kedaluwarsa. Jalankan /addserver lagi."))
         return True
 
     text = (_msg(update).text or "").strip()
     if text.lower() in ("/cancel", "cancel", "batal"):
-        _server_wizard.pop(chat_id, None)
+        _drop_server_wizard(chat_id)
         await _msg(update).reply_text(_t(lang, "✖️ Cancelled. Nothing was saved.",
                                               "✖️ Dibatalkan. Tidak ada yang disimpan."))
         return True
@@ -9628,6 +9698,7 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
             return True
         data["name"] = text
         state["step"] = "host"
+        _save_server_wizard()
         await _msg(update).reply_text(_srv_prompt("host", lang), parse_mode="HTML")
         return True
 
@@ -9638,6 +9709,7 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
             return True
         data["host"] = text
         state["step"] = "user"
+        _save_server_wizard()
         await _msg(update).reply_text(_srv_prompt("user", lang), parse_mode="HTML")
         return True
 
@@ -9648,6 +9720,7 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
             return True
         data["user"] = text
         state["step"] = "port"
+        _save_server_wizard()
         await _msg(update).reply_text(_srv_prompt("port", lang), parse_mode="HTML")
         return True
 
@@ -9658,6 +9731,7 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
         return True
     data["port"] = int(text)
     state["step"] = "authorize"
+    _save_server_wizard()
 
     loop = asyncio.get_running_loop()
     try:
@@ -9670,7 +9744,7 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     except Exception as exc:
         logger.exception("could not prepare the agent keypair")
-        _server_wizard.pop(chat_id, None)
+        _drop_server_wizard(chat_id)
         await _msg(update).reply_text(_t(lang,
             f"⚠️ Couldn't prepare an SSH key: {exc}",
             f"⚠️ Gagal siapkan SSH key: {exc}",
@@ -9740,7 +9814,7 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def _finish_addserver(update: Update, query, discovery: str = "") -> None:
     chat_id = update.effective_chat.id
-    state = _server_wizard.pop(chat_id, None)
+    state = _drop_server_wizard(chat_id)
     if not state:
         return
     data = state["data"]
@@ -11076,6 +11150,7 @@ def main() -> None:
 
     apply_hardening_on_start()
     logger.info("Lite Agent starting (allowed users: %s)", ALLOWED_USER_IDS or "ANY (no allowlist!)")
+    _load_server_wizard()   # resume any /addserver left mid-flight by a restart
     # drop_pending_updates=False: a transient crash (network blip, etc.) is
     # recovered by systemd's Restart=on-failure in seconds, but with the old
     # True setting, ANY message sent during that gap was silently discarded

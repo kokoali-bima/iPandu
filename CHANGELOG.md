@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.2b.87 -- /addserver lost a host it had already reached, and said nothing
+
+A real one, on the itbutler cluster. The operator ran the add-server wizard for
+10.10.59.75, an NFS host. The agent connected, placed its key, verified it, and
+showed the "Key installed and verified" card. Then they tapped the last button
+and got "That form expired". The host never made it into /servers, and 18,128
+lines of journal did not mention it once.
+
+Two independent faults, and the fix for each is small.
+
+**The wizard lived only in memory, with a fifteen-minute TTL, and the service
+restarted underneath it.** The restart was the v0.2b.86 /update -- the operator
+was mid-wizard when the bot updated itself. `/unlock` has persisted its state
+across restarts for exactly this reason since it was written; the server wizard
+never did. It does now: written to `server_wizard.json` after every step and
+reloaded at startup, dropping any that expired while the process was down. The
+step that matters most -- "key installed, waiting for the final tap" -- is now
+exactly the state that survives.
+
+The password is deliberately NOT part of what gets persisted. It is a local
+variable in the input handler, deleted the instant `bootstrap_key_with_password`
+returns, and it was never written into wizard state to begin with -- so the new
+file on disk carries host, user and port (the same fields `servers.json` already
+stores in clear) and nothing secret. It is chmod 600 and gitignored regardless,
+and a test drives a realistic wizard through the file and asserts nothing
+password-shaped appears in it.
+
+**`bootstrap_key_with_password` had no logging at all.** Placing a credential on
+a machine is the single most consequential thing the wizard does, and it left no
+trace unless ssh itself errored. Diagnosing this incident meant reading
+`~/.ssh/known_hosts` by hand for a timestamp to prove the connection had even
+happened. Five log points now: placing the key, a refused password, an ssh
+failure, a key that writes but will not authenticate, and a verified success.
+None of them logs the password.
+
+That fourth case is worth naming, because 10.10.59.75 is still not added: the
+key was appended to `authorized_keys` and then did not authenticate. On an
+appliance that does not persist `/root/.ssh` -- which an NFS box may well be --
+the append succeeds against an overlay that is wiped, or root key-login is off.
+The log now says "key written but does not authenticate yet" instead of a silent
+success followed by a mystery. Whether .75 can take a key at all is a question
+about that box, and the next step there is to confirm what it is.
+
+Registered as E018 and E019. **1,002 checks across 45 suites.**
+
 ## v0.2b.86 -- the release gate had two holes, and one of them ran the repo
 
 v0.2b.85 shipped correctly and turned CI red on all four Python versions. The

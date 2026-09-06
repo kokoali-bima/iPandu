@@ -25,6 +25,7 @@ Thumbs.db
 # clone-based deployment would otherwise commit.
 pin.json
 servers.json
+server_wizard.json
 schedules.json
 snapshots.json
 setup_state.json
