@@ -30,6 +30,52 @@ does not separate the risk if the key is the same.
 
 Baseline: 839 tests across 38 suites, all passing at the fork point.
 
+## v0.2b.80 -- paramiko was not needed, and the group case is handled
+
+Two questions settled by measuring rather than reasoning.
+
+**No new dependency.** The plan was to add `paramiko` so the bot could log in
+with a password once and install its keys. Installed into a throwaway venv it
+brings **seven packages** -- bcrypt, cryptography, invoke, pynacl and their own
+deps -- into a project that has exactly one. Before accepting that, the tool
+already on every host was tested: `ssh` itself, fed a password through
+`SSH_ASKPASS` with `SSH_ASKPASS_REQUIRE=force` under `setsid`.
+
+It works. Proven against a host that offers password auth, using a username
+that does not exist so no real account could be locked out: the askpass helper
+was invoked, which is the only thing in question -- whether a password can reach
+ssh with no terminal attached. OpenSSH 9.6 on the agent hosts, and
+`SSH_ASKPASS_REQUIRE` needs 8.4 or newer.
+
+And the password need never touch disk. The obvious helper script echoes the
+secret, which writes it to a file -- exactly what the feature exists to avoid.
+Instead the helper reads an environment variable, so the file on disk contains a
+variable name and nothing else. Verified: the value reaches the helper.
+
+**The bot now checks whether it can clean up, before inviting a credential.**
+Telegram grants bots deletion of *incoming* messages in private chats
+specifically; in a group that takes the `can_delete_messages` administrator
+right, which is separate from adding or removing members. `bot_can_delete_here()`
+answers that per chat, and it is asked **before** the paste, because finding out
+the bot cannot delete once the password is already on screen is finding out too
+late.
+
+When it cannot, the warning says exactly what to grant and what not to:
+
+> To let me clean these up here, make me an admin with **Delete messages**
+> only; I do not need to add or remove members.
+
+Anything other than an explicit `True` counts as no -- a plain member, an admin
+without that right, and a membership lookup that fails all fall the same way.
+
+**A test that was lying, twice.** Two assertions passed for the wrong reasons
+and then failed for the wrong reasons: one matched a phrase the source wraps
+across two lines, the other searched for `await msg.delete()` from the start of
+the file and found an unrelated wizard's call several hundred lines earlier. Both
+now anchor to the block they are actually about.
+
+895/895 across 39 suites.
+
 ## v0.2b.79 -- a password typed into the chat is caught in code, not by a model
 
 Handing over credentials is the natural thing to do when a machine needs them.

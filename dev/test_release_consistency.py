@@ -44,8 +44,16 @@ def check(name: str, ok: bool) -> None:
 
 def git(*args: str) -> tuple[bool, str]:
     try:
+        # encoding is explicit, not the platform default. Without it this
+        # decodes as cp1252 on Windows, and the first non-Latin-1 character in
+        # the CHANGELOG -- an em dash is enough -- makes `git show` come back
+        # as None. The tag check then failed on a release that was perfectly
+        # fine, on the machine where it is run before pushing, while passing on
+        # Linux. A gate that is wrong on the machine you check from is worse
+        # than no gate: it teaches you to push past it.
         p = subprocess.run(["git", *args], cwd=str(REPO), capture_output=True,
-                           text=True, timeout=30)
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=30)
         return p.returncode == 0, (p.stdout or "").strip()
     except Exception:
         return False, ""
