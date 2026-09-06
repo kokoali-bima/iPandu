@@ -197,4 +197,59 @@ ERRORS = [
         "guard": "test_run_all.py",
         "release": "v0.2b.79",
     },
+    {
+        "id": "E013",
+        "date": "2026-09-06",
+        "area": "Dev tooling",
+        "symptom": "C:/Users/muali/.ssh/ held agent_readonly and agent_write, "
+                   "dated three days earlier. No test was supposed to be able "
+                   "to write there.",
+        "cause": "Every suite redirects HOME to a scratch directory, but "
+                 "Path.home() does not read HOME on Windows -- it reads "
+                 "USERPROFILE. So 28 suites ran against the operator's real "
+                 "home, and the two suites that noticed were reported as "
+                 "platform skips rather than as the warning they were.",
+        "fix": "Every suite now pins USERPROFILE alongside HOME. "
+               "test_suite_hygiene.py fails if any suite sets one without the "
+               "other, and also refuses read_text/write_text with no encoding, "
+               "which is cp1252 on Windows and could not read what the product "
+               "had just written as UTF-8.",
+        "guard": "test_suite_hygiene.py",
+        "release": "v0.2b.85",
+    },
+    {
+        "id": "E014",
+        "date": "2026-09-06",
+        "area": "Dev tooling",
+        "symptom": "run_all printed a green TOTAL and exited 0 with a suite in "
+                   "the tree that could not be parsed at all.",
+        "cause": "Any suite that exited non-zero without printing a tally was "
+                 "filed as SKIP. That bucket is meant for 'this machine lacks "
+                 "an optional dependency'; an IndentationError in our own file "
+                 "landed in it too and therefore cost nothing.",
+        "fix": "A SyntaxError, IndentationError or TabError is now reported as "
+               "BROKEN and fails the run. A missing dependency is still a skip "
+               "-- both directions are guarded, because a rule that failed "
+               "everything would pass the first check for free.",
+        "guard": "test_run_all.py",
+        "release": "v0.2b.85",
+    },
+    {
+        "id": "E015",
+        "date": "2026-09-06",
+        "area": "Dev tooling",
+        "symptom": "test_node_guard.py reported 18/18 on Windows while three "
+                   "of its checks never ran.",
+        "cause": "Skips inside a suite were invisible. A suite that gated "
+                 "checks on a platform capability still printed a spotless "
+                 "N/N, so the pre-push hook -- which was written precisely to "
+                 "refuse runs that prove nothing -- had nothing to threshold. "
+                 "The first fix for this was worse: gating the whole block "
+                 "dropped eleven checks that were perfectly able to run.",
+        "fix": "Suites report 'N/M passed, K skipped'; run_all totals K and "
+               "prints it; the hook refuses above ISLA_MAX_SKIP_CHECKS. Gates "
+               "are placed per check, never per block.",
+        "guard": "test_run_all.py",
+        "release": "v0.2b.85",
+    },
 ]

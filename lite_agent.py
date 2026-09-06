@@ -2441,6 +2441,20 @@ def apply_update() -> tuple[bool, str, str]:
         _git("reset", "--hard", before)
         logger.error("update rolled back -- new code does not compile: %s", check.stderr[:400])
         return False, before, "the new version does not compile; rolled back"
+    # Compiling is not starting. A build with a NameError at module level, or a
+    # handler pointing at a function that was renamed, passes the check above
+    # and then dies on the way up -- and dies again every five seconds, because
+    # there is nothing left running that could undo it. So arm the boot guard
+    # here and let tools/boot_guard.py, which runs before the interpreter loads
+    # this file at all, put the checkout back if the new build never reaches
+    # post_init. Best-effort: failing to arm must not fail an update that has
+    # otherwise succeeded.
+    try:
+        state = _read_update_state()
+        state.update({"rollback_to": before, "boot_attempts": 0})
+        _write_update_state(state)
+    except OSError:
+        logger.warning("could not arm the boot guard", exc_info=True)
     return True, before, out[:400]
 
 
@@ -10899,6 +10913,18 @@ def main() -> None:
 
     async def _announce_update(application) -> None:
         """One shot, on startup, only if an update just restarted us."""
+        # Reaching post_init is the proof the boot guard is waiting for: the
+        # token was accepted and the application initialised. Disarm BEFORE the
+        # early return below -- a start with nothing to announce is still a
+        # start, and leaving the guard armed would roll back a healthy build
+        # the next time the service is restarted for any reason at all.
+        try:
+            state = _read_update_state()
+            if state.pop("rollback_to", None) is not None or state.get("boot_attempts"):
+                state["boot_attempts"] = 0
+                _write_update_state(state)
+        except OSError:
+            logger.warning("could not disarm the boot guard", exc_info=True)
         if not UPDATE_ANNOUNCE_FILE.exists():
             return
         try:
@@ -10909,6 +10935,33 @@ def main() -> None:
             return
         UPDATE_ANNOUNCE_FILE.unlink(missing_ok=True)
         lang = info.get("lang", DEFAULT_LANGUAGE)
+        if info.get("rolled_back"):
+            # The operator pressed update, watched it say "restarting", and
+            # then heard nothing. Say plainly what happened, and say what was
+            # NOT touched -- the first fear on seeing this is losing the PIN
+            # and the server list.
+            failed = _tg_escape(str(info.get("failed", "?")))
+            back_to = _tg_escape(str(info.get("to", "?")))
+            try:
+                await application.bot.send_message(
+                    chat_id=info["chat_id"],
+                    text=_t(lang,
+                        f"\u26a0\ufe0f <b>Rolled back to {back_to}.</b>\n\n"
+                        f"<i>{failed} installed, but would not start. The "
+                        "previous version was restored automatically. Your "
+                        "settings, briefs, sessions and PIN are untouched.</i>"
+                        "\n\nWhy it failed: <code>journalctl -u lite-agent -n 50</code>",
+                        f"\u26a0\ufe0f <b>Dikembalikan ke {back_to}.</b>\n\n"
+                        f"<i>{failed} sudah terpasang, tapi tidak mau hidup. "
+                        "Versi sebelumnya dipulihkan otomatis. Setting, brief, "
+                        "sesi, dan PIN Anda tidak tersentuh.</i>"
+                        "\n\nPenyebabnya: <code>journalctl -u lite-agent -n 50</code>",
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                logger.warning("could not deliver the rollback notice", exc_info=True)
+            return
         try:
             await application.bot.send_message(
                 chat_id=info["chat_id"],

@@ -35,6 +35,9 @@ SRC = sys.argv[1]
 scratch = Path(tempfile.mkdtemp(prefix="isla_unlockwin_"))
 atexit.register(_shutil.rmtree, str(scratch), ignore_errors=True)
 os.environ["HOME"] = str(scratch)
+# Path.home() ignores HOME on Windows -- USERPROFILE is what it reads,
+# so a suite setting only HOME silently tests the real home there.
+os.environ["USERPROFILE"] = str(scratch)
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "t")
 os.environ.setdefault("ALLOWED_USER_IDS", "111")
 os.environ["ALLOWED_GROUP_IDS"] = ""
@@ -166,7 +169,7 @@ mod.SSH_ACTIVE_KEY = scratch / "active"
 with patch.object(mod, "_point_active_key_at", lambda *_: None):
     t0 = mod.unlock_write_mode(30, max_minutes=360)
     check("a fresh unlock records when the session began",
-          "opened_at" in mod.WRITE_STATE_FILE.read_text())
+          "opened_at" in mod.WRITE_STATE_FILE.read_text(encoding="utf-8"))
     check("...and opens for the minutes asked", 29 * 60 < t0 - mod._dt.datetime.now().timestamp() <= 30 * 60)
 
     room = mod.write_mode_session_left(360)
@@ -181,9 +184,9 @@ with patch.object(mod, "_point_active_key_at", lambda *_: None):
     # Now pretend the session began 5h58m ago: an extension may only reach the
     # ceiling, never past it.
     import json as _json
-    state = _json.loads(mod.WRITE_STATE_FILE.read_text())
+    state = _json.loads(mod.WRITE_STATE_FILE.read_text(encoding="utf-8"))
     state["opened_at"] = mod._dt.datetime.now().timestamp() - (358 * 60)
-    mod.WRITE_STATE_FILE.write_text(_json.dumps(state))
+    mod.WRITE_STATE_FILE.write_text(_json.dumps(state), encoding="utf-8")
     t2 = mod.unlock_write_mode(30, max_minutes=360, extend=True)
     left2 = (t2 - mod._dt.datetime.now().timestamp()) / 60
     check(f"an extension cannot chain past the 6-hour ceiling "

@@ -123,6 +123,9 @@ scratch = Path(tempfile.mkdtemp(prefix="isla_unitref_"))
 # assertion still cleans up.
 atexit.register(_shutil.rmtree, str(scratch), ignore_errors=True)
 os.environ["HOME"] = str(scratch)
+# Path.home() ignores HOME on Windows -- USERPROFILE is what it reads,
+# so a suite setting only HOME silently tests the real home there.
+os.environ["USERPROFILE"] = str(scratch)
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "t")
 os.environ.setdefault("ALLOWED_USER_IDS", "111")
 os.environ["ALLOWED_GROUP_IDS"] = ""
@@ -145,7 +148,7 @@ check("...and it runs BEFORE the restart, so systemd loads the new unit",
 # bot that never comes back.
 mod.SERVICE_TEMPLATE = scratch / "bad.template"
 mod.SERVICE_UNIT_PATH = scratch / "fake.service"
-mod.SERVICE_TEMPLATE.write_text("[Unit]\nDescription=no service section\n")
+mod.SERVICE_TEMPLATE.write_text("[Unit]\nDescription=no service section\n", encoding="utf-8")
 check("a malformed template is refused rather than installed",
       "malformed" in mod.refresh_systemd_unit())
 check("...and nothing was written over the installed unit",
@@ -170,8 +173,8 @@ if os.name != "nt":
     mod.BASE_DIR = scratch
     mod.MEMORY_DIR = scratch / "memory"
     mod.MEMORY_DIR.mkdir(exist_ok=True)
-    (scratch / "sessions.json").write_text("{}")
-    (scratch / "pin.json").write_text("{}")
+    (scratch / "sessions.json").write_text("{}", encoding="utf-8")
+    (scratch / "pin.json").write_text("{}", encoding="utf-8")
     for f in ("sessions.json", "pin.json"):
         (scratch / f).chmod(0o644)
     mod.MEMORY_DIR.chmod(0o755)

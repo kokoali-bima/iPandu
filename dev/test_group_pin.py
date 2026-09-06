@@ -51,6 +51,9 @@ def fresh_module(extra_env=None):
     mod_path = scratch / "lite_agent.py"
     shutil.copy(SRC, mod_path)
     os.environ["HOME"] = str(scratch)
+    # Path.home() ignores HOME on Windows -- USERPROFILE is what it reads,
+    # so a suite setting only HOME silently tests the real home there.
+    os.environ["USERPROFILE"] = str(scratch)
     os.environ["TELEGRAM_BOT_TOKEN"] = "t"
     os.environ["ALLOWED_USER_IDS"] = str(OWNER)
     os.environ["ALLOWED_GROUP_IDS"] = f"{GROUP_A},{GROUP_B}"
@@ -219,7 +222,7 @@ async def main():
     # ---- 9. backward compatibility: an OLD flat pin.json is read correctly ----
     mod2, scratch2 = fresh_module()
     old_flat = {"salt": "aa" * 16, "hash": "bb" * 32}
-    mod2.PIN_FILE.write_text(json.dumps(old_flat))
+    mod2.PIN_FILE.write_text(json.dumps(old_flat), encoding="utf-8")
     check("old flat pin.json: pin_is_set() still True", mod2.pin_is_set() is True)
     store = mod2._pin_store()
     check("old flat pin.json: normalized into the owner slot",

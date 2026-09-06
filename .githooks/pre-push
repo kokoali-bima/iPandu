@@ -1,0 +1,82 @@
+#!/bin/sh
+# Refuse to push when the suite is red.
+#
+# Written the day CI was found to have been failing for three consecutive
+# releases without anyone noticing. Every release note in that stretch ended
+# with a green figure -- real numbers, from one machine on one Python version,
+# while GitHub Actions was red on 3.10 and 3.11.
+#
+# Branch protection would enforce this properly, but it needs GitHub Pro on a
+# private repo. This is the free stand-in: it runs where the push starts, so a
+# red suite never becomes a tag.
+#
+# Enable once, per clone:
+#     git config core.hooksPath .githooks
+#
+# Bypass deliberately, when you mean it:
+#     git push --no-verify
+#
+# It is a hook, not a wall. That is the point -- it should cost a conscious
+# decision to skip, not be impossible to skip.
+
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT" || exit 1
+
+PY=${ISLA_PYTHON:-python3}
+command -v "$PY" >/dev/null 2>&1 || PY=python
+command -v "$PY" >/dev/null 2>&1 || {
+    echo "pre-push: no python found; skipping the suite (set ISLA_PYTHON)" >&2
+    exit 0
+}
+
+echo "pre-push: running the full suite before this leaves the machine…"
+if "$PY" dev/run_all.py lite_agent.py >/tmp/isla_prepush.log 2>&1; then
+    # Green is not enough. On a machine without python-telegram-bot installed,
+    # 32 of 41 suites SKIP and the run still exits 0 -- it reported 97/97 while
+    # three quarters of the checks never executed. That is the same shape as
+    # the CI failure this hook was written for: a number that looks like
+    # assurance and is not. Refuse it.
+    #
+    # Two kinds of skip, both counted. A whole suite can fail to start, and
+    # a suite that DOES start can drop individual checks on this platform --
+    # the second kind used to print a spotless N/N and say nothing at all.
+    TOTAL_LINE=$(grep '^TOTAL' /tmp/isla_prepush.log | tail -1)
+    SKIPPED=$(printf '%s' "$TOTAL_LINE" | sed -n 's/.*, \([0-9]\{1,\}\) suite(s) skipped.*/\1/p')
+    SKIPPED=${SKIPPED:-0}
+    SKIPPED_CHECKS=$(printf '%s' "$TOTAL_LINE" | sed -n 's/.*, \([0-9]\{1,\}\) check(s) skipped.*/\1/p')
+    SKIPPED_CHECKS=${SKIPPED_CHECKS:-0}
+    if [ "$SKIPPED_CHECKS" -gt "${ISLA_MAX_SKIP_CHECKS:-8}" ]; then
+        echo >&2
+        echo "pre-push: REFUSED — $SKIPPED_CHECKS individual checks were skipped." >&2
+        echo "A suite printed a clean tally while quietly not running them:" >&2
+        echo >&2
+        grep -E '^[[:space:]]*SKIP - ' /tmp/isla_prepush.log | head -6 >&2
+        echo >&2
+        echo "Deliberate exception: ISLA_MAX_SKIP_CHECKS=$SKIPPED_CHECKS git push" >&2
+        exit 1
+    fi
+    if [ "$SKIPPED" -gt "${ISLA_MAX_SKIP:-2}" ]; then
+        echo >&2
+        echo "pre-push: REFUSED — $SKIPPED suites were SKIPPED, so this run" >&2
+        echo "proves almost nothing. Usually python-telegram-bot is missing." >&2
+        echo >&2
+        grep "SKIP" /tmp/isla_prepush.log | head -4 >&2
+        echo >&2
+        echo "Run where the dependencies are installed, or:" >&2
+        echo "  pip install -r requirements.txt" >&2
+        echo "Deliberate exception: ISLA_MAX_SKIP=$SKIPPED git push" >&2
+        exit 1
+    fi
+    tail -3 /tmp/isla_prepush.log
+    echo "pre-push: green — pushing."
+    exit 0
+fi
+
+echo
+echo "pre-push: REFUSED — the suite is not green." >&2
+echo >&2
+tail -25 /tmp/isla_prepush.log >&2
+echo >&2
+echo "Full output: /tmp/isla_prepush.log" >&2
+echo "If you really mean to push this: git push --no-verify" >&2
+exit 1
