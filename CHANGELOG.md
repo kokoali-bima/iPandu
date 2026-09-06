@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.2b.88 -- a flaky link to Telegram no longer aborts PIN entry
+
+Found on the bscloud agent, which has a slow path to Telegram. The operator was
+registering the Bima Kota Proxmox (103.152.36.66) through the chat auto-add flow
+-- type a request naming a host, the bot offers to register it, PIN confirms it.
+It kept failing, and the natural suspicion was the SSH key. The key was never
+the problem: `agent_write` already authenticated to that Proxmox
+(`SRV-M10-KOBI01`, pve-manager 9.2.11). The flow never got as far as the key.
+
+Every digit on the PIN keypad calls `query.answer()` -- the cosmetic ack that
+stops the little spinner on the tapped button, which Telegram clears on its own
+after a few seconds regardless. One of those calls hit a transient
+`httpx.ReadTimeout`, it raised `telegram.error.TimedOut`, and that aborted
+`cmd_pin_key` mid-handler. The PIN never completed, so the registration it was
+confirming never ran. The whole thing turned on a spinner acknowledgment that,
+on a good link, nobody would ever notice.
+
+`_safe_answer()` now wraps the ack: it swallows `TimedOut`, `NetworkError` and
+`BadRequest` (the last covers "query is too old", equally nothing to do about),
+and re-raises anything else so a real bug still surfaces. All 31 `answer()`
+call sites route through it. A flaky link can still drop an ack, but it can no
+longer take the handler down with it -- the digit registers, the keypad
+redraws, the confirmation completes.
+
+The reproduction is the test that matters: `cmd_pin_key` driven with a query
+whose `answer()` always times out, asserting the digit still lands in the
+session and the handler does not raise.
+
+For the operator: nothing about the Bima Kota Proxmox needs changing. Once this
+is deployed, re-run the add through chat and complete the PIN -- and since the
+key already works there, choose "use the existing key" rather than a password.
+
+Registered as E020. **1,014 checks across 46 suites.**
+
 ## v0.2b.87 -- /addserver lost a host it had already reached, and said nothing
 
 A real one, on the itbutler cluster. The operator ran the add-server wizard for

@@ -334,4 +334,26 @@ ERRORS = [
         "guard": "test_server_wizard_persist.py",
         "release": "v0.2b.87",
     },
+    {
+        "id": "E020",
+        "date": "2026-09-06",
+        "area": "Add server",
+        "symptom": "Registering the Bima Kota Proxmox (103.152.36.66) through "
+                   "the chat auto-add flow failed at the PIN keypad. The key "
+                   "was fine -- agent_write already authenticated to that "
+                   "Proxmox; the flow never reached the key step.",
+        "cause": "cmd_pin_key calls query.answer() on every digit -- a cosmetic "
+                 "ack that only stops the button spinner. On the bscloud agent, "
+                 "which has a slow path to Telegram, one ack hit an "
+                 "httpx.ReadTimeout, raised telegram.error.TimedOut, and aborted "
+                 "the handler mid-entry. The PIN never completed, so the "
+                 "registration never ran.",
+        "fix": "_safe_answer() wraps query.answer() and swallows TimedOut, "
+               "NetworkError and BadRequest (query-too-old) while re-raising "
+               "everything else. All 31 answer() call sites route through it, so "
+               "a flaky link can drop an ack but can no longer take a handler "
+               "down with it.",
+        "guard": "test_safe_answer.py",
+        "release": "v0.2b.88",
+    },
 ]

@@ -4183,6 +4183,22 @@ def _chunk_lines(text: str, limit: int) -> list[str]:
     return chunks or [""]
 
 
+async def _safe_answer(query, *args, **kwargs) -> None:
+    """Acknowledge a callback query, tolerating a flaky link to Telegram.
+
+    query.answer() only stops the spinner on the tapped button, and Telegram
+    clears that on its own after a few seconds. But a network blip turns it
+    into a raised TimedOut that aborts the whole handler -- which on
+    2026-09-06 killed PIN entry on the bscloud agent: a digit's ack timed
+    out and the registration it was confirming never completed. A cosmetic
+    ack must never be able to do that."""
+    try:
+        await query.answer(*args, **kwargs)
+    except (TimedOut, NetworkError, BadRequest):
+        # BadRequest covers 'query is too old', which is also nothing to do.
+        logger.debug("callback answer() failed, continuing", exc_info=True)
+
+
 def _msg(update: Update):
     """The message to reply to, whatever kind of update this is.
 
@@ -5458,9 +5474,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_start_lang_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not _may_run_setup(update):
-        await query.answer(_t(_chat_lang(update), "Not permitted.", "Tidak diizinkan."), show_alert=True)
+        await _safe_answer(query, _t(_chat_lang(update), "Not permitted.", "Tidak diizinkan."), show_alert=True)
         return
-    await query.answer()
+    await _safe_answer(query)
     _, choice = query.data.split(":", 1)
     chat_id = str(update.effective_chat.id)
     prefs = _read_chat_languages()
@@ -5475,12 +5491,12 @@ async def cmd_setup_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     lang = _chat_lang(update)
     _, _, what = query.data.partition(":")
     if not _may_run_setup(update):
-        await query.answer(_t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
+        await _safe_answer(query, _t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
         return
     if not _is_owner(update) and not await _is_group_admin(update, context):
-        await query.answer(_t(lang, "Group admins only.", "Cuma admin grup."), show_alert=True)
+        await _safe_answer(query, _t(lang, "Group admins only.", "Cuma admin grup."), show_alert=True)
         return
-    await query.answer()
+    await _safe_answer(query)
 
     if what == "close":
         await query.edit_message_text(_t(lang, "Setup closed. Run /start any time.",
@@ -5564,12 +5580,12 @@ async def cmd_logout_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     lang = _chat_lang(update)
     if not _may_run_setup(update):
-        await query.answer()
+        await _safe_answer(query)
         return
     if not _is_owner(update) and not await _is_group_admin(update, context):
-        await query.answer(_t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
+        await _safe_answer(query, _t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
         return
-    await query.answer()
+    await _safe_answer(query)
     _, _, which = query.data.partition(":")
 
     if which == "cancel":
@@ -6345,9 +6361,9 @@ async def cmd_update_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     lang = _chat_lang(update)
     if not await _may_authorize_group_action(update, context):
-        await query.answer(_t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
+        await _safe_answer(query, _t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
         return
-    await query.answer()
+    await _safe_answer(query)
     choice = query.data.split(":", 1)[1]
     if choice == "no":
         await query.edit_message_text(_t(lang,
@@ -7004,10 +7020,10 @@ async def cmd_help_lang_chosen(update: Update, context: ContextTypes.DEFAULT_TYP
     """Callback for the /help language-picker buttons."""
     query = update.callback_query
     if not _authorized(update):
-        await query.answer()
+        await _safe_answer(query)
         return
     text = HELP_TEXT_ID if query.data == "help_id" else HELP_TEXT_EN
-    await query.answer()
+    await _safe_answer(query)
     chunks = _split_for_telegram(text)
     # An edit can only ever hold ONE message's worth of text -- the language
     # picker's own message becomes the first chunk, and the rest (if any)
@@ -7199,7 +7215,7 @@ async def cmd_extend_write_button(update: Update, context: ContextTypes.DEFAULT_
     the session has spent its whole ceiling, a fresh PIN is required.
     """
     query = update.callback_query
-    await query.answer()
+    await _safe_answer(query)
     lang = _chat_lang(update)
     if not await _may_authorize_group_action(update, context):
         return
@@ -7658,9 +7674,9 @@ async def cmd_gdrive_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     lang = _chat_lang(update)
     if not await _may_authorize_group_action(update, context):
-        await query.answer(_t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
+        await _safe_answer(query, _t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
         return
-    await query.answer()
+    await _safe_answer(query)
     parts = query.data.split(":", 2)
     # "gdrv:<name>" was the only shape before disconnect existed. Still
     # accepted, so a picker card left sitting in a chat from before an update
@@ -8554,7 +8570,7 @@ async def cmd_pin_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     lang = _chat_lang(update)
     session = _pin_sessions.get(token)
     if not session:
-        await query.answer(_t(lang, "This PIN entry expired — start again.",
+        await _safe_answer(query, _t(lang, "This PIN entry expired — start again.",
                                    "PIN ini sudah kedaluwarsa — mulai lagi."), show_alert=True)
         return
     # Who may drive the keypad depends on the action: a registered group's own
@@ -8570,7 +8586,7 @@ async def cmd_pin_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     else:
         may_touch = _is_owner(update)
     if not may_touch:
-        await query.answer(_t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
+        await _safe_answer(query, _t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
         return
     # ...but the action decides whether this is an acceptable PLACE to do it.
     # Only reachable for an owner outside PIN_ACTIONS_ALLOWED_IN_GROUP now (a
@@ -8579,27 +8595,27 @@ async def cmd_pin_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # would be actively misleading for someone who really is the owner.
     if (session["action"] not in PIN_ACTIONS_ALLOWED_IN_GROUP
             and not _is_trusted_origin(update)):
-        await query.answer(_t(lang,
+        await _safe_answer(query, _t(lang,
             "This action can only be confirmed in a private DM.",
             "Aksi ini cuma bisa dikonfirmasi lewat DM pribadi.",
         ), show_alert=True)
         return
     if session["expires"] < _dt.datetime.now().timestamp():
         _pin_sessions.pop(token, None)
-        await query.answer(_t(lang, "Expired.", "Kedaluwarsa."), show_alert=True)
+        await _safe_answer(query, _t(lang, "Expired.", "Kedaluwarsa."), show_alert=True)
         await query.edit_message_text(_t(lang, "🔢 PIN entry expired.", "🔢 PIN sudah kedaluwarsa."))
         return
 
     if key == "cancel":
         _pin_sessions.pop(token, None)
-        await query.answer()
+        await _safe_answer(query)
         await query.edit_message_text(_t(lang, "✖️ Cancelled.", "✖️ Dibatalkan."))
         return
     if key == "del":
         session["digits"] = session["digits"][:-1]
     elif key.isdigit():
         session["digits"] += key
-    await query.answer()
+    await _safe_answer(query)
 
     header = (query.message.text or "").split("\n🔢")[0].split("\n●")[0].split("\n○")[0]
     header = header.split("\n❌")[0].rstrip() + _t(lang,
@@ -9034,24 +9050,24 @@ async def cmd_schedule_decision(update: Update, context: ContextTypes.DEFAULT_TY
     action, _, token = query.data.partition(":")
     lang = _chat_lang(update)
     if not await _may_authorize_group_action(update, context):
-        await query.answer(_t(lang, "Bot owner, or a registered group's own admin.",
+        await _safe_answer(query, _t(lang, "Bot owner, or a registered group's own admin.",
                                    "Pemilik bot, atau admin dari grup yang sudah terdaftar."), show_alert=True)
         return
     item = _pending_schedules.pop(token, None)
     if not item:
-        await query.answer()
+        await _safe_answer(query)
         await query.edit_message_text(_t(lang,
             "That proposal has expired — ask again if you still want it.",
             "Proposal itu sudah kedaluwarsa — minta lagi kalau masih mau.",
         ))
         return
     if action == "sched_no":
-        await query.answer()
+        await _safe_answer(query)
         await query.edit_message_text(_t(lang, f"✖️ Not installed: {item['name']}", f"✖️ Tidak dipasang: {item['name']}"))
         return
     # The tap alone is not the authorisation. It only says WHICH proposal; the
     # PIN says a person -- not just a logged-in device -- actually wants it.
-    await query.answer()
+    await _safe_answer(query)
     await query.edit_message_text(_t(lang,
         f"🗓 Installing <b>{_tg_escape(item['name'])}</b> — confirm with your PIN.",
         f"🗓 Memasang <b>{_tg_escape(item['name'])}</b> — konfirmasi dengan PIN.",
@@ -9269,7 +9285,7 @@ async def offer_register_host(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def cmd_newhost_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Answer to the unknown-host card."""
     query = update.callback_query
-    await query.answer()
+    await _safe_answer(query)
     lang = _chat_lang(update)
     chat_id = update.effective_chat.id
     pending = _pending_newhost.get(chat_id)
@@ -9364,9 +9380,9 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     _, action, value = query.data.split(":", 2)
     chat_id = update.effective_chat.id
     if not _may_run_setup(update):
-        await query.answer(_t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
+        await _safe_answer(query, _t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
         return
-    await query.answer()
+    await _safe_answer(query)
 
     if action == "cancel":
         _drop_server_wizard(chat_id)
@@ -10157,17 +10173,17 @@ async def cmd_needwrite_button(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id = update.effective_chat.id
     lang = _chat_lang(update)
     if not await _may_authorize_group_action(update, context):
-        await query.answer(_t(lang, "Bot owner, or a registered group's own admin.",
+        await _safe_answer(query, _t(lang, "Bot owner, or a registered group's own admin.",
                                    "Pemilik bot, atau admin dari grup yang sudah terdaftar."), show_alert=True)
         return
     pending = _pending_write.get(chat_id)
     if not pending or pending["expires"] < _dt.datetime.now().timestamp():
         _pending_write.pop(chat_id, None)
-        await query.answer()
+        await _safe_answer(query)
         await query.edit_message_text(_t(lang, "That request expired. Just ask again.",
                                                "Permintaan itu sudah kedaluwarsa. Minta lagi saja."))
         return
-    await query.answer()
+    await _safe_answer(query)
 
     if choice == "cancel":
         _pending_write.pop(chat_id, None)
