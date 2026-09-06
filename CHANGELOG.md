@@ -18,6 +18,46 @@
      that gap, but that is the maintainer's call, not something a contributing
      branch should decide by editing a check written one release ago. -->
 
+## Unreleased -- OPNsense, with writes tied to /unlock
+
+`tools/opn` calls an OPNsense API on behalf of the agent. One key does both
+reading and writing, by the operator's choice, and that choice is right:
+OPNsense grants privileges per PAGE rather than per verb, so a key that can
+read the firewall page can post to it too. A second "read-only" key would be a
+second credential to rotate for a boundary OPNsense cannot enforce.
+
+So the boundary lives in the wrapper:
+
+- **Reads are ungated.** Most of what a firewall gets asked is a read, and
+  making those ask permission is friction with nothing behind it.
+- **Writes require write mode to be open** -- checked against the very file
+  `unlock_write_mode()` writes, expiry included. Not a copy of the rule, the
+  rule itself: when the window lapses, writes stop. The refusal names `/unlock`
+  and says reads still work, so nobody unlocks merely to look.
+- **No write without a rollback point.** Before the first change of each
+  window the running config is downloaded to `opnsense-backups/`; if that
+  download fails, the change does not happen. Same reasoning as
+  `take_snapshot()`: the agent cannot be relied on to create a rollback point
+  for a change it has not decided to make yet, so the wrapper does it first.
+  Paired with OPNsense's own configuration history, a bad change is one revert
+  away -- and rollback, not prevention, is the honest protection here.
+
+It also raises the on-demand VPN when the firewall sits behind one. `curl` does
+not go through ssh, so the ProxyCommand never fires for an API call; without
+this the first request after an idle shutdown fails with a routing error that
+reads like the firewall being down.
+
+Stated rather than glossed: this is not a wall. The agent runs as the same
+Linux user and could curl the key directly, exactly as it could use
+`~/.ssh/agent_write` directly today. The wrapper marks intent, stops accidents,
+keeps a log, and guarantees the rollback point.
+
+The brief the model receives is now built by `capabilities_brief()`, which adds
+the OPNsense section only where the credentials actually exist. A deployment
+without them is not told about a tool it cannot use -- otherwise the model
+offers it, the operator asks for it, and the failure arrives several turns
+later as a confusing error instead of a straight "not set up here".
+
 ## Unreleased -- /update could not restart itself, and said it had
 
 The sudoers rule `newagent.sh` writes did not match the command the bot runs.

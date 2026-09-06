@@ -2970,7 +2970,7 @@ def _run_claude_once(prompt: str, session_id: Optional[str], session_name: str, 
         # be pure waste. SOUL.md cannot carry this -- it is written by the
         # install and never updated, so it describes whatever the feature set
         # was on the day the box was set up.
-        extra_parts.insert(0, CAPABILITIES_BRIEF)
+        extra_parts.insert(0, capabilities_brief())
     combined_extra = "\n\n".join(extra_parts)
     if combined_extra:
         cmd += ["--append-system-prompt", combined_extra]
@@ -3038,6 +3038,29 @@ def run_claude(prompt: str, session_id: Optional[str], session_name: str, model:
 # and arrives with /update like everything else. Injected only when a
 # conversation STARTS, exactly like the operator brief, so it costs its tokens
 # once rather than every turn.
+OPNSENSE_CONF_DIR = Path.home() / ".opnsense"
+
+OPNSENSE_BRIEF = """
+This deployment can query an OPNsense firewall, through `tools/opn` in the
+install directory -- never with a raw curl, which would bypass everything
+below:
+
+  tools/opn /api/core/firmware/status
+  tools/opn /api/diagnostics/interface/getInterfaceNames
+  tools/opn /api/firewall/filter/addRule -X POST -d '<json>'
+
+Reads (plain GET) work at any time. Anything that CHANGES the firewall is
+refused unless write mode is open, and `opn` checks that itself -- so do not
+try to route around a refusal, relay it: the operator opens write mode with
+/unlock in a private DM. Before the first change of each window `opn`
+downloads the running config as a rollback point, and refuses the change if
+that download fails.
+
+If the firewall sits behind the on-demand VPN, `opn` raises the tunnel itself.
+A plain ping or curl does NOT -- only ssh and `opn` do -- so a UIN address
+failing to ping means nothing about whether the host is up."""
+
+
 CAPABILITIES_BRIEF = """[What you can do here -- current as of this build:]
 
 You can produce and send real media, not just text. Say what you did; never
@@ -3079,6 +3102,23 @@ Drive markers, each on its own line, all gated behind the operator's PIN:
 """
 
 
+def capabilities_brief() -> str:
+    """The brief, plus whatever THIS deployment actually has wired up.
+
+    A function rather than one more constant, because a deployment with no
+    OPNsense credentials must not be told about a tool it cannot use: the model
+    would offer it, the operator would ask for it, and the failure would arrive
+    several turns later as a confusing error instead of a straight "not set up
+    here". Same reasoning as sending the brief only on a fresh session -- say
+    what is true of this box, and nothing else.
+    """
+    parts = [CAPABILITIES_BRIEF]
+    if (OPNSENSE_CONF_DIR / "api.key").exists() and \
+            (OPNSENSE_CONF_DIR / "base_url").exists():
+        parts.append(OPNSENSE_BRIEF)
+    return "\n".join(parts)
+
+
 def _build_agy_prompt(prompt: str, include_env: bool = False, owner_dm: bool = False,
                       chat_id: Optional[str] = None) -> str:
     """agy has no --append-system-prompt equivalent, so context is folded into
@@ -3101,7 +3141,7 @@ def _build_agy_prompt(prompt: str, include_env: bool = False, owner_dm: bool = F
         # Capabilities first, and unconditionally: the operator's brief may be
         # older than the build (it is never rewritten by /update), so this is
         # the only description of the current feature set the model gets.
-        parts.append(CAPABILITIES_BRIEF)
+        parts.append(capabilities_brief())
     if include_env and GEMINI_PROMPT_FILE.exists():
         env_text = GEMINI_PROMPT_FILE.read_text().strip()
         if env_text:
