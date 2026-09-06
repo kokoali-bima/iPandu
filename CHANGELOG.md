@@ -47,6 +47,52 @@ does not separate the risk if the key is the same.
 
 Baseline: 839 tests across 38 suites, all passing at the fork point.
 
+## v0.2b.81 -- the bot can put its own key on a new machine
+
+The last manual step in `/addserver` was the one people put off: leave Telegram,
+find another way onto the machine, paste a command, come back. For a VM inside a
+hypervisor that meant finding console access first.
+
+`install_node_guard()` already did everything else -- guard script, read-only key
+behind it, write key -- but it needs a key that already works. On a brand new
+host there is none. That gap is now closed with one password, used once, to
+place the write key. Everything after it is the existing path, unchanged.
+
+**Nothing new was installed for it.** `ssh` reads a password from `SSH_ASKPASS`
+when no terminal is attached, under `setsid` with `SSH_ASKPASS_REQUIRE=force`.
+Verified on this fleet against a host that offers password auth, using a
+username that does not exist so no real account could be locked out. paramiko
+would have worked too, at seven packages in a project that has one.
+
+**The password never reaches disk.** The obvious askpass helper echoes the
+secret, which writes it to a file -- exactly what this exists to avoid. Ours
+reads an environment variable, so the file holds a variable name and nothing
+else. It is not on the command line either, where `ps` would show it.
+
+**Where the bot cannot clean up, it will not ask.** Telegram lets a bot delete
+incoming messages in a private chat; in a group that needs the
+`can_delete_messages` admin right specifically. `bot_can_delete_here()` is
+checked *before* the password is invited, and the refusal names that one right
+and says the member permissions are not needed.
+
+The order matters more than it looks: the message is deleted **first**, before
+anything that can fail. Everything after can go wrong; the message sitting in
+the chat is the one thing that must not survive a failure.
+
+**Exit 0 is not accepted as success.** The key is proven by using it --
+`test_server_ssh` with the key and the password out of the picture entirely. A
+remote command that returned 0 without the key landing would otherwise register
+a host the agent cannot reach.
+
+Afterwards the operator is told, plainly, to change that password: it travelled
+through Telegram to get here. The bot never stored it, and drops it the moment
+the call returns.
+
+Still deliberately not done: reconfiguring `sshd` to refuse password logins.
+That one locks you out permanently if it is wrong, so it waits.
+
+916/916 across 40 suites.
+
 ## v0.2b.80 -- paramiko was not needed, and the group case is handled
 
 Two questions settled by measuring rather than reasoning.
