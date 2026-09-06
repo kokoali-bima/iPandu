@@ -18,6 +18,40 @@
      that gap, but that is the maintainer's call, not something a contributing
      branch should decide by editing a check written one release ago. -->
 
+## Unreleased -- /gdrivetarget: a shared drive is a different root
+
+A report was sent "to the shared drive TIPD". The remote had no `team_drive`,
+so rclone was working in the account's My Drive the whole time — and rclone
+models a shared drive as a different ROOT, not a longer path, so no destination
+the operator types can reach one. The upload would have reported success and
+the folder they were watching would have stayed empty. On the day a quota error
+masked it, which is the only reason it was noticed at all.
+
+`/gdrivetarget` shows where the room's Drive account currently writes, lists
+the shared drives it can see, and points it at one — or back at My Drive with
+`/gdrivetarget mydrive`. `/gdrive` picks WHICH account; this picks WHERE inside
+it.
+
+Three things it refuses to guess about:
+
+- `set_gdrive_target()` goes through `rclone config update`, never a hand-edit.
+  rclone owns that file's format and every other stanza in it is somebody's
+  working credential — the same reasoning as `connect_gdrive_account()`.
+- It **lists the new root before reporting success**. A setting that saved but
+  cannot be reached is the same silent-success failure one step further along.
+- Listing shared drives needs more than the `drive.file` scope the device flow
+  issues — `drive.file` only ever sees what the bot itself created, which a
+  shared drive somebody else made is not. That refusal is reported as exactly
+  that, with both ways out: paste the id from the browser URL, which still
+  works, or reconnect with a full drive token. Reporting it as "no shared
+  drives found" would send the operator into Google's sharing settings looking
+  for a problem that is in the token.
+
+Also of note, from the same incident: the destination folder was named
+`Laporan SERVER / INFRA`. rclone reads `/` as a path separator, so that is two
+nested folders with trailing and leading spaces, not one folder with a slash in
+its name. Nothing in the tooling can express the latter.
+
 ## Unreleased -- OPNsense, with writes tied to /unlock
 
 `tools/opn` calls an OPNsense API on behalf of the agent. One key does both

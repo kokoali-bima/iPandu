@@ -6580,6 +6580,7 @@ Every reply ends with a "— by ..." tag. If it's ever NOT "{TIERS[0]['label']}"
 /forget <number> — delete one wrong learned fact (numbers come from /learned)
 /gdrive — pick (or show) which connected Drive account this room uploads to (0 tokens)
 /gdrivestatus — is each connected Drive account still working? (0 tokens)
+/gdrivetarget [id|mydrive] — write into a shared drive instead of My Drive (a shared drive is a different root, not a longer path)
 /graduate <name> — turn the case you JUST solved into a reusable script (free to reuse afterward)
 /help — this guide (choose EN or ID)
 /lang [en|id] — set/show this chat's language for the bot's own fixed replies (0 tokens)
@@ -6653,6 +6654,7 @@ Setiap balasan diakhiri tanda "— by ...". Kalau tandanya BUKAN "{TIERS[0]['lab
 /forget <nomor> — hapus satu catatan hasil belajar yang keliru (nomornya dari /learned)
 /gdrive — pilih (atau lihat) akun Drive mana yang dipakai room ini untuk upload (NOL token)
 /gdrivestatus — apakah tiap akun Drive yang terhubung masih jalan? (0 token)
+/gdrivetarget [id|mydrive] — tulis ke shared drive, bukan My Drive (shared drive itu root yang berbeda, bukan sekadar path yang lebih panjang)
 /graduate <nama> — ubah kasus yang BARU SAJA selesai jadi script reusable (gratis dipakai lagi)
 /help — panduan ini (pilih EN atau ID)
 /lang [en|id] — atur/lihat bahasa balasan tetap bot untuk chat ini (NOL token)
@@ -7393,6 +7395,78 @@ async def _offer_gdrive_mutations(update: Update, context: ContextTypes.DEFAULT_
         "masih menyimpannya sementara — tapi tidak ada satu pun bagian bot ini "
         "yang bisa mengembalikannya.</i>"),
     )
+
+
+async def cmd_gdrivetarget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Choose whether this room's Drive account writes into My Drive or a
+    shared drive.
+
+    /gdrive picks WHICH account; this picks WHERE inside it. They are separate
+    because rclone models a shared drive as a different root rather than a
+    longer path, so no destination string can express one -- an upload aimed at
+    "the shared drive TIPD" simply lands in My Drive, reports success, and
+    leaves the folder somebody is watching empty. That happened here before
+    this existed.
+    """
+    if not await _may_authorize_group_action(update, context):
+        return
+    lang = _chat_lang(update)
+    accounts = _list_gdrive_accounts()
+    if not accounts:
+        await update.message.reply_text(_t(lang,
+            "📁 No Google Drive account is connected yet -- /connectgdrive first.",
+            "📁 Belum ada akun Google Drive yang terhubung -- /connectgdrive dulu."))
+        return
+    name = _gdrive_effective_default(str(update.effective_chat.id), accounts)
+    if not name:
+        await update.message.reply_text(_t(lang,
+            "📁 This room has not picked a Drive account yet -- run /gdrive first.",
+            "📁 Room ini belum memilih akun Drive -- jalankan /gdrive dulu."))
+        return
+
+    arg = (context.args[0].strip() if context.args else "")
+    loop = asyncio.get_running_loop()
+
+    if arg:
+        drive_id = "" if arg.lower() in ("mydrive", "my", "none", "clear") else arg
+        ok, detail = await loop.run_in_executor(None, set_gdrive_target, name, drive_id)
+        await update.message.reply_text(
+            (_t(lang, f"✅ <b>{_tg_escape(name)}</b>: {_tg_escape(detail)}",
+                      f"✅ <b>{_tg_escape(name)}</b>: {_tg_escape(detail)}")
+             if ok else
+             _t(lang, f"⚠️ Not changed: {_tg_escape(detail)}",
+                      f"⚠️ Tidak diubah: {_tg_escape(detail)}")),
+            parse_mode="HTML")
+        return
+
+    current = await loop.run_in_executor(None, gdrive_target, name)
+    lines = [_t(lang, f"📁 <b>Upload destination for {_tg_escape(name)}</b>",
+                      f"📁 <b>Tujuan upload untuk {_tg_escape(name)}</b>"), ""]
+    lines.append(_t(lang,
+        f"Currently: <b>{'shared drive ' + _tg_escape(current) if current else 'My Drive'}</b>",
+        f"Sekarang: <b>{'shared drive ' + _tg_escape(current) if current else 'My Drive'}</b>"))
+    lines.append("")
+
+    ok, drives = await loop.run_in_executor(None, gdrive_shared_drives, name)
+    if not ok:
+        lines.append(_t(lang,
+            f"Shared drives could not be listed: {_tg_escape(str(drives))}",
+            f"Shared drive tidak bisa didaftar: {_tg_escape(str(drives))}"))
+    elif not drives:
+        lines.append(_t(lang,
+            "This account can see no shared drives.",
+            "Akun ini tidak melihat satu pun shared drive."))
+    else:
+        lines.append(_t(lang, "Shared drives it can see:", "Shared drive yang terlihat:"))
+        for d in drives[:25]:
+            lines.append(f"• <b>{_tg_escape(d['name'])}</b> — <code>{_tg_escape(d['id'])}</code>")
+    lines.append("")
+    lines.append(_t(lang,
+        "Set one with <code>/gdrivetarget &lt;id&gt;</code>, or go back to My "
+        "Drive with <code>/gdrivetarget mydrive</code>.",
+        "Pilih dengan <code>/gdrivetarget &lt;id&gt;</code>, atau kembali ke My "
+        "Drive dengan <code>/gdrivetarget mydrive</code>."))
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def cmd_gdrive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -8292,6 +8366,93 @@ def connect_gdrive_account(name: str, token_raw: str,
         return False, f"verification failed after setup: {exc}"
 
     return True, "connected and verified"
+
+
+# --------------------------------------------------------------------------
+# Where a Drive account actually writes
+#
+# A remote with no team_drive works in the account's My Drive, and nothing says
+# so. A report sent "to the shared drive TIPD" lands in My Drive instead, the
+# upload reports success, and the folder the operator is watching stays empty.
+# That is the failure this exists to remove: rclone models a shared drive as a
+# different ROOT, not a different path, so it cannot be expressed by typing a
+# longer destination.
+# --------------------------------------------------------------------------
+
+def gdrive_shared_drives(name: str) -> tuple[bool, object]:
+    """Shared drives this account can see: [{"id","name"}, ...], or an error.
+
+    Needs more than the drive.file scope the device flow issues -- drive.file
+    can only ever see what the bot itself created, which by definition is not
+    a shared drive somebody else set up. The failure is reported as exactly
+    that rather than as an empty list, because "no shared drives" and "this
+    token is not allowed to look" are very different problems.
+    """
+    try:
+        r = _rclone_run("backend", "drives", f"{name}:", timeout=45)
+    except Exception as exc:
+        return False, f"could not ask rclone: {exc}"
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()[:300]
+        if "insufficient" in err.lower() or "403" in err:
+            return False, ("this account's token cannot LIST shared drives -- it "
+                           "was issued for the drive.file scope, which only ever "
+                           "sees files this bot created. Setting one still works: "
+                           "open the shared drive in a browser and pass the id "
+                           "from its URL. A full listing needs a full drive "
+                           "token: /connectgdrive manual")
+        return False, err or "rclone could not list shared drives"
+    try:
+        drives = json.loads(r.stdout or "[]")
+    except (json.JSONDecodeError, ValueError):
+        return False, "rclone returned something that is not JSON"
+    return True, [{"id": d.get("id", ""), "name": d.get("name", "")}
+                  for d in drives if d.get("id")]
+
+
+def gdrive_target(name: str) -> str:
+    """The team_drive id this remote writes into, or "" for My Drive."""
+    try:
+        r = _rclone_run("config", "show", name, timeout=15)
+    except Exception:
+        logger.warning("could not read the remote %s", name, exc_info=True)
+        return ""
+    for line in (r.stdout or "").splitlines():
+        if line.strip().startswith("team_drive"):
+            _, _, val = line.partition("=")
+            return val.strip()
+    return ""
+
+
+def set_gdrive_target(name: str, drive_id: str) -> tuple[bool, str]:
+    """Point a remote at a shared drive, or back at My Drive with "".
+
+    `rclone config update`, never a hand-edit: the same reasoning as
+    connect_gdrive_account() -- rclone owns that file's format, and every other
+    account in it is somebody's working credential.
+    """
+    if name not in _list_gdrive_accounts():
+        return False, f"no Drive account called '{name}'"
+    try:
+        r = _rclone_run("config", "update", name, f"team_drive={drive_id}",
+                        "--non-interactive", timeout=30)
+    except Exception as exc:
+        return False, f"could not update the remote: {exc}"
+    if r.returncode != 0:
+        return False, (r.stderr or r.stdout or "").strip()[:300]
+
+    # Prove it before saying so. A remote that saved the setting but cannot
+    # actually reach the drive is the silent-success case again, one step
+    # further along.
+    try:
+        check = _rclone_run("lsd", f"{name}:", timeout=45)
+    except Exception as exc:
+        return False, f"set, but listing the new root failed: {exc}"
+    if check.returncode != 0:
+        return False, ("set, but that root cannot be listed: "
+                       + (check.stderr or check.stdout or "").strip()[:300])
+    where = f"shared drive {drive_id}" if drive_id else "My Drive"
+    return True, f"now writing into {where}"
 
 
 async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -10628,6 +10789,7 @@ def main() -> None:
     app.add_handler(CommandHandler("lock", cmd_lock))
     app.add_handler(CommandHandler("usemodel", cmd_usemodel))
     app.add_handler(CommandHandler("gdrive", cmd_gdrive))
+    app.add_handler(CommandHandler("gdrivetarget", cmd_gdrivetarget))
     app.add_handler(CommandHandler("connectgdrive", cmd_connectgdrive))
     app.add_handler(CommandHandler(["lang", "language"], cmd_lang))
     app.add_handler(CallbackQueryHandler(cmd_gdrive_button, pattern="^gdrv:"))
