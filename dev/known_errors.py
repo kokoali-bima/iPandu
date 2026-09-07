@@ -356,4 +356,47 @@ ERRORS = [
         "guard": "test_safe_answer.py",
         "release": "v0.2b.88",
     },
+    {
+        "id": "E021",
+        "date": "2026-09-07",
+        "area": "Voice input",
+        "symptom": "On the bscloud agent, a voice message got no response. Text "
+                   "worked, and the bot could even reply with voice (Gemini "
+                   "generates the audio), but speaking to it did nothing.",
+        "cause": "The message handler registered TEXT, PHOTO and Document only. "
+                 "A voice note (or audio file) matched no handler and was "
+                 "dropped silently -- the worst failure shape here, since the "
+                 "sender has no idea it arrived.",
+        "fix": "VOICE and AUDIO are registered too. A voice message is saved, "
+               "converted to 16 kHz mono WAV, and its path named in the prompt "
+               "the way an image already is; agy (Gemini) decodes the audio "
+               "natively -- no STT service, no API key, no new dependency. "
+               "Because Claude cannot hear, a voice turn is pinned to an agy "
+               "tier, and only a voice turn is. Verified end to end on the "
+               "bscloud host: a spoken 'restart the web server on node three "
+               "and check disk usage' was transcribed and acted on.",
+        "guard": "test_voice_input.py",
+        "release": "v0.2b.89",
+    },
+    {
+        "id": "E022",
+        "date": "2026-09-07",
+        "area": "Document input",
+        "symptom": "On the itbutler agent, sending a PDF or an HTML file got "
+                   "'I can read images, but not this kind of attachment'. The "
+                   "file was never read.",
+        "cause": "Images had their own handler and audio had just gotten one, "
+                 "but every other document fell through to a refusal branch and "
+                 "was never saved or passed to a model -- despite both CLIs "
+                 "being perfectly able to read a file from a path.",
+        "fix": "_save_incoming_document downloads any document (keeping its "
+               "extension) and names its path in the prompt, the way an image "
+               "already is; whichever tier answers reads it -- no forced model, "
+               "no per-format extraction, no new dependency. Verified live on "
+               "itbutler: agy AND claude each read a test PDF and a test HTML "
+               "and returned the marker string inside. The old refusal now only "
+               "fires on a genuine download failure, and says so honestly.",
+        "guard": "test_document_input.py",
+        "release": "v0.2b.90",
+    },
 ]
