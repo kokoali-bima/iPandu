@@ -2199,6 +2199,19 @@ def password_auth_state(host: str, user: str, port: int) -> Optional[bool]:
     return None
 
 
+# Hosts where this advice must never appear, because the decision it is
+# nagging about was already made, deliberately, and is not up for another
+# round: a production box whose dev team depends on password SSH staying
+# open. The feature only ever advises -- it acts on nothing -- but repeating
+# advice against a settled decision is its own kind of noise, and eventually
+# the kind that gets a real warning tuned out along with it.
+SSH_HARDEN_EXEMPT_HOSTS = {
+    h.strip().lower()
+    for h in os.environ.get("SSH_HARDEN_EXEMPT_HOSTS", "").split(",")
+    if h.strip()
+}
+
+
 def harden_ssh_advice(lang: str) -> str:
     """The exact commands to make a host key-only, for the operator to run.
 
@@ -10888,12 +10901,17 @@ async def _finish_addserver(update: Update, query, discovery: str = "") -> None:
     # Only when it is actually still open. Advice that arrives on a host that
     # is already key-only is noise, and noise is what teaches people to skip
     # the paragraph that matters. Asked of sshd itself, over the key that was
-    # just proven to work.
-    try:
-        still_open = await asyncio.get_running_loop().run_in_executor(
-            None, password_auth_state, data["host"], data["user"], int(data["port"]))
-    except Exception:
+    # just proven to work. A host in SSH_HARDEN_EXEMPT_HOSTS skips the check
+    # entirely -- not just the message -- because the decision it would be
+    # advising against was already made and is not being reopened.
+    if data["host"].lower() in SSH_HARDEN_EXEMPT_HOSTS:
         still_open = None
+    else:
+        try:
+            still_open = await asyncio.get_running_loop().run_in_executor(
+                None, password_auth_state, data["host"], data["user"], int(data["port"]))
+        except Exception:
+            still_open = None
     if still_open:
         msg += harden_ssh_advice(lang)
     await query.edit_message_text(msg, parse_mode="HTML")
