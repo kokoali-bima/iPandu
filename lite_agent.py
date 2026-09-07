@@ -143,6 +143,79 @@ TURN_TOKEN_CEILING = int(os.environ.get("TURN_TOKEN_CEILING", "0") or 0)
 TURN_COST_HINT_TOKENS = int(os.environ.get("TURN_COST_HINT_TOKENS", "200000") or 0)
 
 
+# A long turn used to look identical to a dead bot: no typing indicator lasts
+# minutes, and nothing else was sent until the answer. Measured across 178 real
+# turns on this deployment: median 29s, p75 84s, p90 284s, p95 493s, longest
+# 6841s (1h54m). 76% finish inside a minute.
+#
+# So the first note waits 90s -- three quarters of all turns never produce one
+# at all -- and after that ONE message is edited in place every 3 minutes
+# rather than a new message each time. At the 3-minute cadence that 1h54m turn
+# would otherwise have sent 38 separate messages; edited in place it stays a
+# single line that is always current.
+HEARTBEAT_FIRST_SECONDS = int(os.environ.get("HEARTBEAT_FIRST_SECONDS", "90"))
+HEARTBEAT_EVERY_SECONDS = int(os.environ.get("HEARTBEAT_EVERY_SECONDS", "180"))
+# How close to the end of the write window before the heartbeat starts offering
+# to extend it. The incident this comes from: a window opened for 10 minutes
+# while the turn it was opened for ran 18.
+WRITE_WARN_MINUTES = int(os.environ.get("WRITE_WARN_MINUTES", "5"))
+
+
+async def _progress_heartbeat(context, chat_id: int, lang: str,
+                              started: "_dt.datetime", cap: int) -> None:
+    """Keep one 'still working' line current while a turn runs.
+
+    Never lets its own failure touch the turn: every Telegram call here is
+    wrapped, because a progress note that breaks the work it is reporting on
+    would be worse than no note at all.
+    """
+    msg = None
+    try:
+        await asyncio.sleep(HEARTBEAT_FIRST_SECONDS)
+        while True:
+            secs = int((_dt.datetime.now() - started).total_seconds())
+            mins = secs // 60
+            body = _t(lang,
+                      f"⏳ Still working — {mins} min {secs % 60}s so far.",
+                      f"⏳ Masih dikerjakan — {mins} menit {secs % 60} detik.")
+            rows = []
+            until = write_mode_expires_at()
+            if until:
+                left = int((until - _dt.datetime.now().timestamp()) / 60) + 1
+                if left <= WRITE_WARN_MINUTES:
+                    room = write_mode_session_left(cap)
+                    body += _t(lang,
+                               f"\n🔓 Write access ends in about {left} min.",
+                               f"\n🔓 Akses tulis habis sekitar {left} menit lagi.")
+                    if room > 1:
+                        add = min(WRITE_MODE_DEFAULT_MINUTES, room)
+                        rows = [[InlineKeyboardButton(
+                            _t(lang, f"➕ Extend {add} min",
+                                     f"➕ Perpanjang {add} menit"),
+                            callback_data=f"extend_write:{add}")]]
+            markup = InlineKeyboardMarkup(rows) if rows else None
+            try:
+                if msg is None:
+                    msg = await context.bot.send_message(
+                        chat_id=chat_id, text=body, reply_markup=markup)
+                else:
+                    await context.bot.edit_message_text(
+                        chat_id=chat_id, message_id=msg.message_id,
+                        text=body, reply_markup=markup)
+            except Exception:
+                pass        # a stale heartbeat is not worth a failed turn
+            await asyncio.sleep(HEARTBEAT_EVERY_SECONDS)
+    except asyncio.CancelledError:
+        # The real answer lands next, so the placeholder has done its job.
+        if msg is not None:
+            try:
+                await context.bot.delete_message(chat_id=chat_id,
+                                                 message_id=msg.message_id)
+            except Exception:
+                pass
+        raise
+
+
 def cost_hint_due(sess: dict, turn_in: int) -> tuple[bool, int]:
     """Should this turn carry the "this conversation is getting expensive" note?
 
@@ -470,12 +543,22 @@ WRITE_STATE_FILE = BASE_DIR / "write_mode.json"
 SSH_ACTIVE_KEY = Path(os.environ.get("SSH_ACTIVE_KEY", str(Path.home() / ".ssh/agent_active")))
 SSH_RO_KEY = Path(os.environ.get("SSH_RO_KEY", str(Path.home() / ".ssh/agent_readonly")))
 SSH_RW_KEY = Path(os.environ.get("SSH_RW_KEY", str(Path.home() / ".ssh/agent_write")))
-WRITE_MODE_MAX_MINUTES = int(os.environ.get("WRITE_MODE_MAX_MINUTES", "60"))
-WRITE_MODE_DEFAULT_MINUTES = int(os.environ.get("WRITE_MODE_DEFAULT_MINUTES", "15"))
-# Ceiling when /unlock is opened from a group rather than a DM -- open-ended
-# write access for the whole window, not one pre-approved action, so it gets
-# a shorter leash than the 60-minute DM ceiling regardless of what is asked for.
-WRITE_MODE_GROUP_MAX_MINUTES = int(os.environ.get("WRITE_MODE_GROUP_MAX_MINUTES", "10"))
+# Six hours is the ceiling, thirty minutes the default. Both were raised after
+# a night that showed the old numbers were not a safety property, they were a
+# nuisance that produced MORE unlocks: a 10-minute group window opened at
+# 23:06:50 for a turn that ran until 23:25:01 -- eighteen minutes, because agy
+# failed over mid-turn and the second model started from scratch. The window
+# died with nine minutes of work still to go, and the operator was asked to
+# unlock again, twice inside 33 seconds. Fourteen unlocks in one day.
+#
+# A window too short to cover one turn does not reduce exposure. It just trains
+# whoever is holding the phone to approve without reading.
+WRITE_MODE_MAX_MINUTES = int(os.environ.get("WRITE_MODE_MAX_MINUTES", "360"))
+WRITE_MODE_DEFAULT_MINUTES = int(os.environ.get("WRITE_MODE_DEFAULT_MINUTES", "30"))
+# Groups still get their own knob, because a group window is open-ended access
+# for every member rather than one pre-approved action. It now matches the DM
+# ceiling by default -- lower it here if a room should have a shorter leash.
+WRITE_MODE_GROUP_MAX_MINUTES = int(os.environ.get("WRITE_MODE_GROUP_MAX_MINUTES", "360"))
 
 
 def _keys_configured() -> bool:
@@ -523,13 +606,50 @@ def lock_write_mode() -> None:
             logger.exception("could not swap back to the read-only key")
 
 
-def unlock_write_mode(minutes: int, max_minutes: Optional[int] = None) -> float:
+def unlock_write_mode(minutes: int, max_minutes: Optional[int] = None,
+                      extend: bool = False) -> float:
+    """Open the write window, or push out the one already open.
+
+    `opened_at` is recorded so an EXTENSION can be granted without asking for
+    the PIN again while still being bounded: the PIN authorised a session, and
+    that session may not outlive the ceiling however many times it is extended.
+    Without that timestamp, "extend" would be an unlimited renewal and the
+    ceiling would mean nothing.
+    """
     minutes = max(1, min(minutes, max_minutes or WRITE_MODE_MAX_MINUTES))
-    until = _dt.datetime.now().timestamp() + minutes * 60
+    now = _dt.datetime.now().timestamp()
+    opened_at = now
+    if extend:
+        try:
+            prev = json.loads(WRITE_STATE_FILE.read_text())
+            opened_at = float(prev.get("opened_at") or now)
+        except (OSError, ValueError, TypeError):
+            opened_at = now
+    until = now + minutes * 60
+    # Never past the ceiling measured from the ORIGINAL PIN, not from this
+    # extension -- otherwise a chain of extensions is an open-ended unlock.
+    hard_stop = opened_at + (max_minutes or WRITE_MODE_MAX_MINUTES) * 60
+    until = min(until, hard_stop)
     _point_active_key_at(SSH_RW_KEY)
-    WRITE_STATE_FILE.write_text(json.dumps({"until": until}))
-    logger.warning("WRITE MODE OPENED for %d minute(s)", minutes)
+    WRITE_STATE_FILE.write_text(json.dumps({"until": until, "opened_at": opened_at}))
+    logger.warning("WRITE MODE %s until +%d minute(s)",
+                   "EXTENDED" if extend else "OPENED", int((until - now) / 60))
     return until
+
+
+def write_mode_session_left(max_minutes: Optional[int] = None) -> int:
+    """Minutes still available to extend into, from the original PIN. Zero when
+    the session has used its whole ceiling and a fresh PIN is required."""
+    try:
+        prev = json.loads(WRITE_STATE_FILE.read_text())
+        opened_at = float(prev.get("opened_at") or 0)
+    except (OSError, ValueError, TypeError):
+        return 0
+    if not opened_at:
+        return 0
+    cap = (max_minutes or WRITE_MODE_MAX_MINUTES) * 60
+    left = (opened_at + cap) - _dt.datetime.now().timestamp()
+    return max(0, int(left / 60))
 
 
 def write_mode_notice() -> str:
@@ -1162,6 +1282,54 @@ SSH_CONFIG_BEGIN = "# BEGIN iSmart-LA managed -- edited by the bot, do not hand-
 SSH_CONFIG_END = "# END iSmart-LA managed"
 SERVER_WIZARD_TTL = 900
 _server_wizard: dict[int, dict] = {}
+SERVER_WIZARD_FILE = BASE_DIR / "server_wizard.json"
+
+
+def _save_server_wizard() -> None:
+    """Persist in-progress /addserver wizards so a restart -- an /update
+    mid-wizard is the usual one -- does not silently drop the form. NEVER holds
+    a password: the password is a local in _handle_server_input, del'd the
+    moment bootstrap returns, and is never written into wizard state."""
+    try:
+        data = {str(cid): st for cid, st in _server_wizard.items()}
+        SERVER_WIZARD_FILE.write_text(json.dumps(data), encoding="utf-8")
+        try:
+            SERVER_WIZARD_FILE.chmod(0o600)
+        except OSError:
+            pass
+    except (OSError, TypeError):
+        logger.warning("could not persist the server wizard", exc_info=True)
+
+
+def _load_server_wizard() -> None:
+    """Bring back wizards that were mid-flight when the process last stopped,
+    dropping any that expired while it was down. Called once at startup."""
+    if not SERVER_WIZARD_FILE.exists():
+        return
+    try:
+        raw = json.loads(SERVER_WIZARD_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.warning("server_wizard.json unreadable -- starting empty",
+                       exc_info=True)
+        SERVER_WIZARD_FILE.unlink(missing_ok=True)
+        return
+    now = _dt.datetime.now().timestamp()
+    restored = 0
+    for cid, st in (raw or {}).items():
+        if isinstance(st, dict) and st.get("expires", 0) > now:
+            _server_wizard[int(cid)] = st
+            restored += 1
+    if restored:
+        logger.info("restored %d in-progress /addserver wizard(s) after restart",
+                    restored)
+    _save_server_wizard()  # rewrite without the expired ones
+
+
+def _drop_server_wizard(chat_id: int):
+    """pop + persist, so a cancelled or finished wizard leaves nothing behind."""
+    st = _server_wizard.pop(chat_id, None)
+    _save_server_wizard()
+    return st
 
 SERVER_KINDS = {
     "hypervisor": "Hypervisor / cluster",
@@ -1188,6 +1356,222 @@ def _read_servers() -> list[dict]:
 
 def _write_servers(items: list[dict]) -> None:
     SERVERS_FILE.write_text(json.dumps(items, indent=2))
+
+
+# --------------------------------------------------------------------------
+# "That host isn't in the inventory yet"
+#
+# The friction being removed: asking the agent to fix something on a machine it
+# has never heard of used to go one of two ways, depending on which model was
+# answering. Measured on a live host over 36 hours -- registering a Proxmox went
+# smoothly on Gemini and cost ten circular turns on Sonnet, which hit the
+# read-only guard and tried to route around it instead of asking for access.
+#
+# /addserver has never had that problem, because it never involves the model at
+# all: it is a deterministic wizard that runs BEFORE the model is called. So the
+# fix is not to teach the models better -- it is to notice the unknown host
+# ourselves and put the deterministic path in front of the operator.
+#
+# Deliberately narrow: an IPv4 literal in the message. A hostname would drag in
+# every domain anyone ever mentions in conversation, and the false positives
+# would train people to dismiss the card without reading it.
+# --------------------------------------------------------------------------
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+_PORT_HINT_RE = re.compile(r"\bport(?:\s+ssh)?\s*:?\s*(\d{2,5})\b", re.I)
+_USER_HINT_RE = re.compile(r"\buser(?:name)?\s*:?\s*([a-z_][a-z0-9_-]{0,31})\b", re.I)
+
+
+def _known_hosts() -> set[str]:
+    """Every address already in the inventory, including cluster members --
+    a node reached through its cluster is not an unknown machine."""
+    known: set[str] = set()
+    for s in _read_servers():
+        if s.get("host"):
+            known.add(str(s["host"]).strip().lower())
+        for extra in (s.get("cluster_hosts") or []):
+            known.add(str(extra).strip().lower())
+    return known
+
+
+def _valid_ipv4(text: str) -> bool:
+    parts = text.split(".")
+    return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
+
+
+def unregistered_hosts_in(text: str) -> list[str]:
+    """IPv4 addresses in `text` that the inventory has never heard of.
+
+    Private-range and public alike -- what matters is whether we know it, not
+    where it lives. Loopback and 0.0.0.0 are dropped: they are never a machine
+    someone wants registered, and they show up in log excerpts constantly.
+    """
+    known = _known_hosts()
+    out: list[str] = []
+    for cand in _IPV4_RE.findall(text or ""):
+        if not _valid_ipv4(cand):
+            continue
+        if cand.startswith("127.") or cand in ("0.0.0.0", "255.255.255.255"):
+            continue
+        low = cand.lower()
+        if low not in known and low not in out:
+            out.append(low)
+    return out
+
+
+# A credential being TYPED, not the word being discussed. "cek password expiry
+# policy" must not fire; "user root password Hunter2" must. So the pattern needs
+# an assignment AND something assigned -- a bare mention is a conversation, and a
+# warning that interrupts conversations is one people learn to ignore.
+#
+# Checked in code, before the model runs: zero tokens, every time, and it cannot
+# be talked out of firing the way an instruction in a brief can.
+# The trailing \b matters. Without it the engine backtracks on "reset password?"
+# -- matching just "pass", then reading "word?" as the secret. Longest keyword
+# first, a boundary after it, and a required space before the value, so
+# "passwordnya apa ya" is a question and not a disclosure.
+_PASSWORD_RE = re.compile(
+    r"\b(?:password|passwd|pwd|pass|kata\s*sandi|sandi)\b"
+    r"\s*(?:adalah|is)?\s*[:=]?\s+"
+    r"(?P<secret>\S{3,})",
+    re.I)
+# Words that follow "password" in a QUESTION rather than a disclosure.
+_PASSWORD_INNOCENT = {
+    "expiry", "policy", "policies", "rotation", "auth", "authentication",
+    "login", "less", "manager", "hash", "hashing", "reset", "expired",
+    "kebijakan", "kadaluarsa", "kedaluwarsa", "masuk", "baru", "lama",
+    "?", "nya", "itu", "apa", "gimana", "bagaimana",
+}
+
+
+def mentions_password(text: str) -> Optional[str]:
+    """The literal that looks like a credential, or None.
+
+    Returns the matched secret only so the caller can measure it -- it is never
+    logged, never stored and never echoed back.
+    """
+    m = _PASSWORD_RE.search(text or "")
+    if not m:
+        return None
+    secret = m.group("secret").strip().strip(".,;:!?")
+    if not secret or secret.lower() in _PASSWORD_INNOCENT:
+        return None
+    # "password:" with nothing after it is someone about to type one, or a
+    # heading in a pasted form. Either way there is nothing to leak yet.
+    if secret.startswith(("http://", "https://")):
+        return None
+    return secret
+
+
+async def bot_can_delete_here(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Can the bot remove someone else's message in THIS chat?
+
+    Private chat: yes. Telegram grants bots that specifically -- "Bots can
+    delete incoming messages in private chats" -- which is why the Drive OAuth
+    flow has been able to clear a pasted token since it was written.
+
+    Group or supergroup: only as an administrator holding can_delete_messages.
+    That right does NOT come with being added to a group, and it is separate
+    from the ability to add or remove members -- so a room can grant exactly
+    this and nothing more.
+
+    Asked before a credential is invited, never after. Discovering the bot
+    cannot clean up once the password is already on screen is discovering it
+    too late.
+    """
+    chat = update.effective_chat
+    if chat is None:
+        return False
+    if chat.type == "private":
+        return True
+    try:
+        me = await context.bot.get_chat_member(chat.id, context.bot.id)
+    except Exception:
+        logger.info("could not read the bot's own membership in %s", chat.id,
+                    exc_info=True)
+        return False
+    if getattr(me, "status", "") != "administrator":
+        return False
+    # can_delete_messages is None for a non-admin and may be absent on older
+    # PTB shapes; treat anything but an explicit True as "no".
+    return getattr(me, "can_delete_messages", False) is True
+
+
+def scrub_password(text: str) -> str:
+    """The same message with the credential replaced.
+
+    Needed because the text does not stop at the warning: it is kept for the
+    "just answer" button and would otherwise be handed to a model with the
+    password still in it -- deleting the chat message while forwarding its
+    contents upstream would be worse than doing nothing, because it would look
+    solved.
+    """
+    def _mask(m):
+        return m.group(0).replace(m.group("secret"), "[dihapus]")
+    return _PASSWORD_RE.sub(_mask, text or "")
+
+
+async def warn_password_in_chat(update: Update, deleted: bool) -> None:
+    """Say why that was a bad idea, and what happens instead.
+
+    Deliberately not a scolding. The operator did the natural thing -- they were
+    handing over what the machine needs -- and the reason it is wrong is not
+    obvious unless someone says it once, plainly.
+    """
+    lang = _chat_lang(update)
+    in_group = getattr(update.effective_chat, "type", "private") != "private"
+    if deleted:
+        gone = _t(lang, "I deleted your message.",
+                        "Pesan Anda sudah saya hapus.")
+    elif in_group:
+        # Name the exact right, and name what is NOT needed. "Make the bot an
+        # admin" reads like handing over the room; the only thing required here
+        # is deleting messages.
+        gone = _t(lang,
+                  "I could not delete it — please delete it yourself. To let me "
+                  "clean these up here, make me an admin with <b>Delete "
+                  "messages</b> only; I do not need to add or remove members.",
+                  "Saya tidak bisa menghapusnya — tolong hapus sendiri. Supaya "
+                  "saya bisa membersihkannya di sini, jadikan saya admin dengan "
+                  "izin <b>Hapus pesan</b> saja; saya tidak butuh izin menambah "
+                  "atau mengeluarkan anggota.")
+    else:
+        gone = _t(lang, "I could not delete your message — please delete it yourself.",
+                        "Pesan Anda tidak bisa saya hapus — tolong hapus sendiri.")
+    await _msg(update).reply_text(
+        _t(lang,
+           f"⚠️ <b>That looked like a password.</b> {gone}\n\n"
+           "A password typed here is stored in this chat's history, on your "
+           "device, on mine, and on Telegram's servers. Deleting it does not "
+           "undo that it was sent. Treat it as exposed and change it.\n\n"
+           "<b>You never need to send me one.</b> When a machine needs "
+           "credentials I ask for them in a wizard, on a keypad, where nothing "
+           "becomes a chat message.",
+           f"⚠️ <b>Itu tadi terlihat seperti password.</b> {gone}\n\n"
+           "Password yang diketik di sini tersimpan di riwayat chat ini, di HP "
+           "Anda, di sisi saya, dan di server Telegram. Menghapusnya tidak "
+           "membatalkan fakta bahwa ia sempat terkirim. Anggap sudah bocor, "
+           "dan ganti.\n\n"
+           "<b>Anda tidak pernah perlu mengirimkannya ke saya.</b> Kalau sebuah "
+           "mesin butuh kredensial, saya yang akan meminta lewat wizard, di "
+           "keypad, sehingga tidak ada yang jadi pesan chat."),
+        parse_mode="HTML")
+
+
+def parse_host_hints(text: str) -> dict:
+    """Port and user, when the operator already said them.
+
+    They usually do -- "ip 192.0.2.10 port ssh 222 user root" is how the request
+    arrives. Picking those up means the wizard opens already filled in rather
+    than asking for what was in the first message.
+    """
+    hints: dict = {}
+    m = _PORT_HINT_RE.search(text or "")
+    if m and 1 <= int(m.group(1)) <= 65535:
+        hints["port"] = int(m.group(1))
+    m = _USER_HINT_RE.search(text or "")
+    if m:
+        hints["user"] = m.group(1)
+    return hints
 
 
 def agent_keypair() -> tuple[Path, Path]:
@@ -1247,16 +1631,27 @@ def _rebuild_ssh_config(items: list[dict]) -> None:
 def test_server_ssh(host: str, user: str, port: int, timeout: int = 20,
                     key_path: Optional[str] = None) -> tuple[bool, str]:
     key = Path(key_path) if key_path else agent_keypair()[0]
+    # A BARE command, with no shell operators. The probe used to be
+    # `echo ISMART_OK && uname -sr`, and our OWN read-only guard refused it:
+    # pve-ro-guard denies any `&`, `;`, backtick or redirect outright, before
+    # it ever looks at the verbs. So every /addserver against an
+    # already-secured Proxmox failed with "refused -- this key is read-only",
+    # while the key itself was fine. Reproduced on both hosts in this fleet.
+    # The only server that ever registered got in before the guard existed.
+    #
+    # `uname -sr` needs no sentinel: it either answers "Linux <release>" or it
+    # did not run. That is the same evidence ISMART_OK was carrying, without
+    # asking the guard to parse a compound command.
     proc = subprocess.run(
         ["ssh", "-i", str(key), "-p", str(port),
          "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
          "-o", f"ConnectTimeout={timeout}", f"{user}@{host}",
-         "echo ISMART_OK && uname -sr"],
+         "uname -sr"],
         capture_output=True, text=True, timeout=timeout + 10,
     )
-    if "ISMART_OK" in proc.stdout:
-        detail = proc.stdout.replace("ISMART_OK", "").strip()
-        return True, detail or "connected"
+    out = (proc.stdout or "").strip()
+    if proc.returncode == 0 and out and "refused" not in out.lower():
+        return True, out
     return False, (proc.stderr or proc.stdout or "no response").strip()[-400:]
 
 
@@ -1665,6 +2060,174 @@ def verify_node_guard(host: str, user: str, port: int) -> tuple[bool, str]:
     # claim a boundary that was not actually observed.
     detail = (write.stderr or write.stdout or "").strip()[-200:]
     return True, "write refused (not by pve-ro-guard): " + detail
+
+
+# --------------------------------------------------------------------------
+# Bootstrapping the first key onto a host we cannot reach yet
+#
+# install_node_guard() does everything else -- guard script, read-only key
+# behind it, write key -- but it needs a key that already works. On a brand new
+# machine there is none, and the operator was told to paste a command into a
+# terminal somewhere else. That is the step people put off.
+#
+# So: one password, used once, to place the write key. After that the existing
+# path takes over unchanged.
+#
+# No new dependency. `ssh` reads the password from SSH_ASKPASS when there is no
+# terminal, which was verified on this fleet against a host that offers password
+# auth (OpenSSH 9.6; SSH_ASKPASS_REQUIRE needs 8.4+). paramiko would have cost
+# seven packages in a project that has one.
+#
+# The password never touches disk. The obvious helper echoes the secret, which
+# writes it to a file -- exactly what this feature exists to avoid. This one
+# reads an environment variable, so the file on disk holds a variable name and
+# nothing else.
+# --------------------------------------------------------------------------
+def bootstrap_key_with_password(host: str, user: str, port: int,
+                                password: str) -> tuple[bool, str]:
+    """Place the agent's write key on `host` using a password, once.
+
+    Returns (ok, detail). `detail` is safe to show: it never contains the
+    password, and ssh's own stderr is filtered for anything that echoes it.
+    """
+    rw_pub_path = SSH_RW_KEY.with_suffix(".pub")
+    logger.info("bootstrap: placing write key on %s@%s:%s", user, host, port)
+    if not rw_pub_path.exists():
+        logger.warning("bootstrap: no write key on this deployment -- aborting")
+        return False, "no write key exists on this deployment yet"
+    rw_pub = rw_pub_path.read_text().strip()
+    if not rw_pub:
+        return False, "the write public key is empty"
+
+    work = Path(tempfile.mkdtemp(prefix="isla_bootstrap_"))
+    try:
+        helper = work / "askpass.sh"
+        # The helper carries no secret -- only the name of the variable.
+        helper.write_text('#!/bin/sh\nprintf "%s" "$ISLA_SSH_PW"\n', encoding="utf-8")
+        helper.chmod(0o700)
+
+        env = os.environ.copy()
+        env.update({
+            "ISLA_SSH_PW": password,
+            "SSH_ASKPASS": str(helper),
+            "SSH_ASKPASS_REQUIRE": "force",
+            "DISPLAY": env.get("DISPLAY", ":0"),
+        })
+
+        # Append the key only if it is not already there, so a retry cannot
+        # produce a duplicate line.
+        marker = rw_pub.split()[1][:40]
+        remote = (
+            "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; "
+            f"grep -qF '{marker}' ~/.ssh/authorized_keys || "
+            f"printf '%s\\n' '{rw_pub}' >> ~/.ssh/authorized_keys"
+        )
+        cmd = ["setsid", "ssh",
+               "-o", "StrictHostKeyChecking=no",
+               "-o", "PreferredAuthentications=password",
+               "-o", "PubkeyAuthentication=no",
+               "-o", "NumberOfPasswordPrompts=1",
+               "-o", "ConnectTimeout=20",
+               "-p", str(port), f"{user}@{host}", remote]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=60, env=env)
+        except FileNotFoundError:
+            return False, "setsid or ssh is missing on this host"
+        except subprocess.TimeoutExpired:
+            return False, "the machine did not answer in time"
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()
+            if "Permission denied" in err:
+                logger.warning("bootstrap: %s@%s:%s refused the password", user, host, port)
+                return False, "wrong password, or that user may not log in with one"
+            logger.warning("bootstrap: ssh to %s@%s:%s failed (rc=%s): %s",
+                           user, host, port, proc.returncode, err[-300:])
+            return False, err[-300:] or "ssh failed with no message"
+    finally:
+        # Before anything else can read it, and whatever happened above.
+        shutil.rmtree(work, ignore_errors=True)
+
+    # Not "the command exited 0" -- prove the KEY works, with the password out
+    # of the picture entirely. That is the only evidence that matters.
+    ok, detail = test_server_ssh(host, user, port, key_path=str(SSH_RW_KEY))
+    if not ok:
+        # This is the 10.10.59.75 shape: the append succeeds and the key
+        # still does not authenticate -- an appliance that does not persist
+        # ~/.ssh, root key-login disabled, a wrong home. Say it in the log.
+        logger.warning("bootstrap: key written to %s@%s:%s but it does not "
+                       "authenticate yet: %s", user, host, port, detail)
+        return False, ("the key was written but does not work yet: " + detail)
+    logger.info("bootstrap: key installed and verified on %s@%s:%s (%s)",
+                user, host, port, detail)
+    return True, detail
+
+
+def password_auth_state(host: str, user: str, port: int) -> Optional[bool]:
+    """Is password login still accepted on this host? None when we cannot tell.
+
+    Asked of sshd itself (`sshd -T`), not of the config file. On every Ubuntu
+    and Proxmox host in this fleet `/etc/ssh/sshd_config` carries an `Include`
+    near the top, and the file that actually decides lives in
+    `sshd_config.d/` -- one host here has `#PasswordAuthentication yes`
+    commented out in the main file while a drop-in sets it to `no`. Reading the
+    main file would have reported the opposite of the truth.
+    """
+    try:
+        proc = subprocess.run(
+            ["ssh", "-i", str(SSH_RW_KEY), "-p", str(port),
+             "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+             "-o", "ConnectTimeout=15", f"{user}@{host}", "sshd -T"],
+            capture_output=True, text=True, timeout=40)
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    for line in (proc.stdout or "").splitlines():
+        if line.lower().startswith("passwordauthentication"):
+            return line.split()[-1].strip().lower() == "yes"
+    return None
+
+
+def harden_ssh_advice(lang: str) -> str:
+    """The exact commands to make a host key-only, for the operator to run.
+
+    Deliberately advice and not an action. Turning off password login is the
+    one change here that locks you out permanently when it goes wrong, so it
+    stays in the hands of whoever can walk to the console.
+
+    The filename matters and is not arbitrary. sshd takes the FIRST value it
+    sees, and `Include /etc/ssh/sshd_config.d/*.conf` sits near the top of the
+    main file -- verified on this fleet, and verified in both directions: with
+    00=no/99=yes the effective value was `no`, and with the values swapped it
+    was `yes`. So a drop-in must sort BEFORE any cloud-image file to win. The
+    `sed -i` recipe that circulates for this edits the main file and is quietly
+    overridden by `60-cloudimg-settings.conf` on exactly the images used here.
+    """
+    return _t(lang,
+        "\n\n🔐 <b>This host still accepts password logins.</b>\n"
+        "Now that my key works, you can close that off. Run on the host:\n"
+        "<pre>printf 'PasswordAuthentication no\\nKbdInteractiveAuthentication no\\n' \\\n"
+        "  > /etc/ssh/sshd_config.d/00-ismart-hardening.conf\n"
+        "sshd -t &amp;&amp; systemctl reload ssh || systemctl reload sshd\n"
+        "sshd -T | grep -i passwordauth</pre>\n"
+        "<i>Keep this SSH session open until that last line prints "
+        "<code>no</code> — reload does not drop existing sessions, so an open "
+        "one is your way back if anything is wrong. The filename starts with "
+        "00 on purpose: sshd takes the first value it reads, and a cloud-image "
+        "drop-in would otherwise win.</i>",
+
+        "\n\n🔐 <b>Host ini masih menerima login password.</b>\n"
+        "Sekarang kunci saya sudah jalan, itu bisa ditutup. Jalankan di host:\n"
+        "<pre>printf 'PasswordAuthentication no\\nKbdInteractiveAuthentication no\\n' \\\n"
+        "  > /etc/ssh/sshd_config.d/00-ismart-hardening.conf\n"
+        "sshd -t &amp;&amp; systemctl reload ssh || systemctl reload sshd\n"
+        "sshd -T | grep -i passwordauth</pre>\n"
+        "<i>Biarkan sesi SSH ini tetap terbuka sampai baris terakhir mencetak "
+        "<code>no</code> — reload tidak memutus sesi yang sudah jalan, jadi "
+        "sesi terbuka itu jalan pulang Anda kalau ada yang salah. Nama "
+        "berkasnya diawali 00 dengan sengaja: sshd memakai nilai pertama yang "
+        "dibacanya, dan drop-in bawaan cloud image akan menang kalau tidak.</i>")
 
 
 def secure_server(host: str, user: str, port: int) -> tuple[bool, str]:
@@ -2153,6 +2716,20 @@ def apply_update() -> tuple[bool, str, str]:
         _git("reset", "--hard", before)
         logger.error("update rolled back -- new code does not compile: %s", check.stderr[:400])
         return False, before, "the new version does not compile; rolled back"
+    # Compiling is not starting. A build with a NameError at module level, or a
+    # handler pointing at a function that was renamed, passes the check above
+    # and then dies on the way up -- and dies again every five seconds, because
+    # there is nothing left running that could undo it. So arm the boot guard
+    # here and let tools/boot_guard.py, which runs before the interpreter loads
+    # this file at all, put the checkout back if the new build never reaches
+    # post_init. Best-effort: failing to arm must not fail an update that has
+    # otherwise succeeded.
+    try:
+        state = _read_update_state()
+        state.update({"rollback_to": before, "boot_attempts": 0})
+        _write_update_state(state)
+    except OSError:
+        logger.warning("could not arm the boot guard", exc_info=True)
     return True, before, out[:400]
 
 
@@ -3196,6 +3773,33 @@ Drive markers, each on its own line, all gated behind the operator's PIN:
   GDRIVE: <local file> -> <folder/name>   upload
   GDRIVE_MOVE: <from> -> <to>             move
   GDRIVE_DELETE: <path>                   delete
+
+## Changing things on a server
+
+By default your SSH key is READ-ONLY and a guard on the far side refuses
+anything that writes -- you will see `pve-ro-guard: refused`. That is normal
+and it is not a fault to work around. Do not retry it, do not look for another
+command that might slip past, and do not tell the operator their key is broken.
+
+Ask for access instead, on its own line:
+
+    NEEDS_WRITE: restart VM 104
+
+The bot turns that into a PIN prompt. Once the operator approves, the same
+commands work. Say what you intend to change, in a few words -- that line is
+what they read before deciding.
+
+## Adding a server
+
+Do NOT try to register a machine by hand -- not by editing ~/.ssh/config, not
+by appending to authorized_keys, not by asking for a password. There is a
+command for it that walks the operator through name, host, user, port and key,
+and it works the same every time:
+
+    Tell them: run /addserver
+
+That is the whole answer. Improvising this is how it goes wrong: the wizard is
+deterministic, and anything you assemble instead is not.
 """
 
 
@@ -3982,12 +4586,46 @@ def _chunk_lines(text: str, limit: int) -> list[str]:
     return chunks or [""]
 
 
+async def _safe_answer(query, *args, **kwargs) -> None:
+    """Acknowledge a callback query, tolerating a flaky link to Telegram.
+
+    query.answer() only stops the spinner on the tapped button, and Telegram
+    clears that on its own after a few seconds. But a network blip turns it
+    into a raised TimedOut that aborts the whole handler -- which on
+    2026-09-06 killed PIN entry on the bscloud agent: a digit's ack timed
+    out and the registration it was confirming never completed. A cosmetic
+    ack must never be able to do that."""
+    try:
+        await query.answer(*args, **kwargs)
+    except (TimedOut, NetworkError, BadRequest):
+        # BadRequest covers 'query is too old', which is also nothing to do.
+        logger.debug("callback answer() failed, continuing", exc_info=True)
+
+
 def _msg(update: Update):
-    """The message to reply to, whether this turn came from the user typing or
-    from them tapping a button (a callback update has no .message)."""
+    """The message to reply to, whatever kind of update this is.
+
+    Three cases, and the third one cost a night of failed deliveries. A typed
+    message has .message. A tapped button has none -- the message hangs off
+    .callback_query. And an EDITED message has neither: PTB puts it on
+    .edited_message.
+
+    _authorized() lets edited messages through on purpose (editing a message to
+    add the @mention you forgot is a normal thing to do), and its comment says
+    that path "reads effective_message instead" -- but this helper never did.
+    So an edited message passed the gate, ran a full turn, and then died in
+    _reply_chunked with "'NoneType' object has no attribute 'reply_text'",
+    twice per turn, including on the notice that was meant to report the
+    failure. Real logs, 10:03 and 10:05 this morning.
+
+    effective_message is PTB's own answer to exactly this question, so use it
+    rather than growing another branch per update type.
+    """
     if update.message is not None:
         return update.message
-    return update.callback_query.message if update.callback_query else None
+    if update.callback_query is not None:
+        return update.callback_query.message
+    return update.effective_message
 
 
 async def _reply_chunked(update: Update, text: str, tag_html: str = "",
@@ -4500,7 +5138,17 @@ def _gdrive_upload(remote: str, local_path: str, drive_rel_path: str) -> tuple[b
             timeout=GDRIVE_UPLOAD_TIMEOUT,
         )
     except subprocess.CalledProcessError as exc:
-        return False, ((exc.stderr or exc.stdout or str(exc)) or "").strip()[:500]
+        blob = ((exc.stderr or exc.stdout or str(exc)) or "").strip()
+        # rclone's shared Google client_id is used by everybody who never made
+        # their own, so its project-wide query quota runs out from time to time
+        # and Google answers 403 "Quota exceeded for quota metric 'Queries'".
+        # Nothing is wrong with the account, the file or the config, and it
+        # clears on its own -- verified: the same remote listed fine five hours
+        # later. Saying that is more useful than pasting rclone's CRITICAL line,
+        # which reads like the Drive connection is broken.
+        if "403" in blob and "quota" in blob.lower():
+            return False, "gdrive_shared_quota"
+        return False, blob[:500]
     except subprocess.TimeoutExpired:
         return False, "timed out talking to Google Drive"
 
@@ -4584,6 +5232,17 @@ async def _send_to_gdrive(update: Update, context: ContextTypes.DEFAULT_TYPE, re
         await _msg(update).reply_text(_t(lang,
             f"\U0001f4c1 Uploaded to Drive ({remote}): {rel_path}{link_en}",
             f"\U0001f4c1 Terupload ke Drive ({remote}): {rel_path}{link_id}",
+        ))
+    elif detail == "gdrive_shared_quota":
+        await _msg(update).reply_text(_t(lang,
+            f"\u23f3 Drive is rate-limited right now, so {rel_path} was not "
+            f"uploaded. This is Google's shared quota for rclone's public "
+            f"client, not a problem with your account or the file \u2014 it "
+            f"clears on its own. Ask again in a few minutes.",
+            f"\u23f3 Drive sedang kena batas laju, jadi {rel_path} belum "
+            f"terupload. Ini kuota bersama Google untuk klien publik rclone, "
+            f"bukan masalah akun atau file Anda \u2014 dan pulih sendiri. "
+            f"Minta lagi beberapa menit lagi.",
         ))
     else:
         await _msg(update).reply_text(_t(lang,
@@ -5218,9 +5877,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_start_lang_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not _may_run_setup(update):
-        await query.answer(_t(_chat_lang(update), "Not permitted.", "Tidak diizinkan."), show_alert=True)
+        await _safe_answer(query, _t(_chat_lang(update), "Not permitted.", "Tidak diizinkan."), show_alert=True)
         return
-    await query.answer()
+    await _safe_answer(query)
     _, choice = query.data.split(":", 1)
     chat_id = str(update.effective_chat.id)
     prefs = _read_chat_languages()
@@ -5235,12 +5894,12 @@ async def cmd_setup_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     lang = _chat_lang(update)
     _, _, what = query.data.partition(":")
     if not _may_run_setup(update):
-        await query.answer(_t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
+        await _safe_answer(query, _t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
         return
     if not _is_owner(update) and not await _is_group_admin(update, context):
-        await query.answer(_t(lang, "Group admins only.", "Cuma admin grup."), show_alert=True)
+        await _safe_answer(query, _t(lang, "Group admins only.", "Cuma admin grup."), show_alert=True)
         return
-    await query.answer()
+    await _safe_answer(query)
 
     if what == "close":
         await query.edit_message_text(_t(lang, "Setup closed. Run /start any time.",
@@ -5324,12 +5983,12 @@ async def cmd_logout_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     lang = _chat_lang(update)
     if not _may_run_setup(update):
-        await query.answer()
+        await _safe_answer(query)
         return
     if not _is_owner(update) and not await _is_group_admin(update, context):
-        await query.answer(_t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
+        await _safe_answer(query, _t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
         return
-    await query.answer()
+    await _safe_answer(query)
     _, _, which = query.data.partition(":")
 
     if which == "cancel":
@@ -5522,7 +6181,7 @@ async def _gdrive_begin_rclone(update: Update, context: ContextTypes.DEFAULT_TYP
     # Checked rather than announced unconditionally: a host that already has
     # rclone must not be told to wait for a download that will not happen.
     if _rclone_path() is None:
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             "⏳ First time on this host — fetching rclone (a single file, "
             "~20 MB) so Drive can work. This takes a few seconds; the sign-in "
             "link comes right after.",
@@ -5538,7 +6197,7 @@ async def _gdrive_begin_rclone(update: Update, context: ContextTypes.DEFAULT_TYP
     ok, result, handle = await loop.run_in_executor(None, gdrive_rclone_start)
     if not ok:
         _gdrive_wizard.pop(chat_id, None)
-        return await update.message.reply_text(_t(lang,
+        return await _msg(update).reply_text(_t(lang,
             f"⚠️ Could not start the sign-in: {_detail('en', result)}",
             f"⚠️ Tidak bisa memulai sign-in: {_detail('id', result)}"))
 
@@ -5548,7 +6207,7 @@ async def _gdrive_begin_rclone(update: Update, context: ContextTypes.DEFAULT_TYP
         state["handle"] = handle
         state["expires"] = _dt.datetime.now().timestamp() + GDRIVE_TOKEN_WIZARD_TTL
 
-    await update.message.reply_text(_t(lang,
+    await _msg(update).reply_text(_t(lang,
         f"🔗 <b>Connect Google Drive</b> (<code>{_tg_escape(name)}</code>)\n\n"
         f"1. Open this link and approve access:\n<code>{_tg_escape(result)}</code>\n\n"
         "2. Your browser will then land on a page that <b>fails to load</b> "
@@ -5591,7 +6250,7 @@ async def _gdrive_begin_device(update: Update, context: ContextTypes.DEFAULT_TYP
         # unreachable. Reported exactly that way on a live deployment.
         if _client_is_dead(body):
             clear_gdrive_client()
-            await update.message.reply_text(_t(lang,
+            await _msg(update).reply_text(_t(lang,
                 "⚠️ That saved Google OAuth client no longer exists, so I've "
                 "removed it. Starting again the simple way — no Google Cloud "
                 "project needed.",
@@ -5602,7 +6261,7 @@ async def _gdrive_begin_device(update: Update, context: ContextTypes.DEFAULT_TYP
             return await _gdrive_begin_rclone(update, context, lang, name)
         _gdrive_wizard.pop(chat_id, None)
         detail = _detail(lang, str(body.get("error_description", "unknown")))
-        return await update.message.reply_text(_t(lang,
+        return await _msg(update).reply_text(_t(lang,
             f"⚠️ Google refused to start the sign-in: {detail}",
             f"⚠️ Google menolak memulai sign-in: {detail}",
         ))
@@ -5613,7 +6272,7 @@ async def _gdrive_begin_device(update: Update, context: ContextTypes.DEFAULT_TYP
     state = _gdrive_wizard.get(chat_id)
     if state is not None:
         state["step"] = "device_pending"
-    await update.message.reply_text(_t(lang,
+    await _msg(update).reply_text(_t(lang,
         f"🔗 <b>Connect Google Drive</b> (<code>{_tg_escape(name)}</code>)\n\n"
         f"1. Open <code>{_tg_escape(url)}</code> on any device — your phone is fine\n"
         f"2. Enter this code:\n\n<code>{_tg_escape(code)}</code>\n\n"
@@ -5750,30 +6409,30 @@ async def _handle_gdrive_wizard_input(update: Update, context: ContextTypes.DEFA
     if not state:
         return False
     lang = _chat_lang(update)
-    text = (update.message.text or "").strip()
+    text = (_msg(update).text or "").strip()
 
     if state["expires"] < _dt.datetime.now().timestamp():
         _gdrive_wizard.pop(chat_id, None)
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             "\u231b That expired. Run /connectgdrive again.",
             "\u231b Sudah kedaluwarsa. Jalankan /connectgdrive lagi."))
         return True
     if text.lower() in ("/cancel", "cancel", "batal"):
         _gdrive_wizard.pop(chat_id, None)
-        await update.message.reply_text(_t(lang, "\u2716\ufe0f Cancelled.", "\u2716\ufe0f Dibatalkan."))
+        await _msg(update).reply_text(_t(lang, "\u2716\ufe0f Cancelled.", "\u2716\ufe0f Dibatalkan."))
         return True
 
     if state["step"] == "await_gdrive_label":
         name = _sanitize_gdrive_label(text)
         if not name or name == "gdrive_":
-            await update.message.reply_text(_t(lang,
+            await _msg(update).reply_text(_t(lang,
                 "That didn't leave anything usable -- letters/digits/-/_ only, "
                 "try again or /cancel.",
                 "Tidak ada yang tersisa dari itu -- huruf/angka/-/_ saja, "
                 "coba lagi atau /cancel."))
             return True
         if name in _list_gdrive_accounts():
-            await update.message.reply_text(_t(lang,
+            await _msg(update).reply_text(_t(lang,
                 f"'{_tg_escape(name)}' already exists -- pick a different label, or /cancel.",
                 f"'{_tg_escape(name)}' sudah ada -- pilih label lain, atau /cancel."))
             return True
@@ -5810,7 +6469,7 @@ async def _handle_gdrive_wizard_input(update: Update, context: ContextTypes.DEFA
         if found_id:
             state["client_id"] = found_id
         if not state.get("client_id"):
-            await update.message.reply_text(_t(lang,
+            await _msg(update).reply_text(_t(lang,
                 "I couldn't find a client ID in that. It's the long value "
                 "ending in <code>.apps.googleusercontent.com</code> — paste it "
                 "here (the secret can come in the same message or the next "
@@ -5826,7 +6485,7 @@ async def _handle_gdrive_wizard_input(update: Update, context: ContextTypes.DEFA
         if not secret:
             state["client_secret"] = ""
             state["expires"] = _dt.datetime.now().timestamp() + GDRIVE_TOKEN_WIZARD_TTL
-            await update.message.reply_text(_t(lang,
+            await _msg(update).reply_text(_t(lang,
                 "Got the client ID. Now send the <b>client secret</b> — the "
                 "shorter value on the same Google page, usually starting with "
                 "<code>GOCSPX-</code>.",
@@ -5858,7 +6517,7 @@ async def _handle_gdrive_wizard_input(update: Update, context: ContextTypes.DEFA
         if not ok:
             # Left in place on purpose: a mistyped paste should let them try
             # again with the same link, not send them back to the start.
-            return await update.message.reply_text(_t(lang,
+            return await _msg(update).reply_text(_t(lang,
                 f"⚠️ {_detail('en', result)}", f"⚠️ {_detail('id', result)}"))
         name = state.get("name") or "gdrive"
         ok, detail = await loop.run_in_executor(
@@ -5867,7 +6526,7 @@ async def _handle_gdrive_wizard_input(update: Update, context: ContextTypes.DEFA
         _gdrive_wizard.pop(chat_id, None)
         en = _tg_escape(_detail("en", str(detail)))
         id_ = _tg_escape(_detail("id", str(detail)))
-        await update.message.reply_text(
+        await _msg(update).reply_text(
             _t(lang, f"✅ <b>{_tg_escape(name)}</b> connected. {en}",
                      f"✅ <b>{_tg_escape(name)}</b> terhubung. {id_}")
             if ok else
@@ -5878,7 +6537,7 @@ async def _handle_gdrive_wizard_input(update: Update, context: ContextTypes.DEFA
 
     if state["step"] == "device_pending":
         # The waiter owns this step; anything typed here is just noise.
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             "Still waiting for you to approve it in the browser. /cancel to stop.",
             "Masih menunggu Anda menyetujuinya di browser. /cancel untuk berhenti."))
         return True
@@ -5887,10 +6546,10 @@ async def _handle_gdrive_wizard_input(update: Update, context: ContextTypes.DEFA
     name = state["name"]
     _gdrive_wizard.pop(chat_id, None)
     try:
-        await update.message.delete()
+        await _msg(update).delete()
     except Exception:
         logger.info("could not delete the pasted gdrive token (needs admin rights in groups)")
-    await update.message.reply_text(_t(lang,
+    await _msg(update).reply_text(_t(lang,
         f"\u23f3 Connecting and verifying \u2018{_tg_escape(name)}\u2019\u2026",
         f"\u23f3 Menghubungkan dan memverifikasi \u2018{_tg_escape(name)}\u2019\u2026"))
     loop = asyncio.get_running_loop()
@@ -5915,7 +6574,7 @@ async def _handle_gdrive_wizard_input(update: Update, context: ContextTypes.DEFA
     if ok:
         logger.warning("gdrive account '%s' connected by user=%s chat=%s",
                        name, update.effective_user.id, chat_id)
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             f"\u2705 <b>{_tg_escape(name)}</b> connected and verified -- a real upload "
             f"and folder check both succeeded, not just \u201csaved\u201d.\n\n"
             f"Run /gdrive to pick it for this room.",
@@ -5926,7 +6585,7 @@ async def _handle_gdrive_wizard_input(update: Update, context: ContextTypes.DEFA
     else:
         logger.warning("gdrive connect '%s' failed for user=%s: %s",
                        name, update.effective_user.id, detail)
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             f"\u274c Couldn't connect \u2018{_tg_escape(name)}\u2019: {_tg_escape(detail)}\n\n"
             "Nothing was left half-configured. Run /connectgdrive to try again.",
             f"\u274c Gagal menghubungkan \u2018{_tg_escape(name)}\u2019: {_tg_escape(detail)}\n\n"
@@ -5949,24 +6608,24 @@ async def _handle_wizard_input(update: Update, context: ContextTypes.DEFAULT_TYP
     if state.get("step") == "await_brief":
         _wizard.pop(chat_id, None)
         if state["expires"] < _dt.datetime.now().timestamp():
-            await update.message.reply_text(_t(lang,
+            await _msg(update).reply_text(_t(lang,
                 "\u231b That expired. Run /start again.",
                 "\u231b Sudah kedaluwarsa. Jalankan /start lagi.",
             ))
             return True
-        role = (update.message.text or "").strip()
+        role = (_msg(update).text or "").strip()
         if role.lower() in ("/cancel", "cancel", "batal"):
-            await update.message.reply_text(_t(lang, "\u2716\ufe0f Cancelled.", "\u2716\ufe0f Dibatalkan."))
+            await _msg(update).reply_text(_t(lang, "\u2716\ufe0f Cancelled.", "\u2716\ufe0f Dibatalkan."))
             return True
         if len(role) < 3:
-            await update.message.reply_text(_t(lang,
+            await _msg(update).reply_text(_t(lang,
                 "That is too short to be useful. Run /start and try again.",
                 "Terlalu pendek untuk berguna. Jalankan /start dan coba lagi.",
             ))
             return True
         set_brief_role(role)
         _mark_setup("brief", update.effective_user.id)
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             f"\u2705 <b>Recorded.</b> This agent looks after: <b>{_tg_escape(role)}</b>\n\n"
             "Next: /addserver to give it a machine to reach, and /addboundary for "
             "anything it must never touch. Run /start if anything else still needs "
@@ -5983,27 +6642,27 @@ async def _handle_wizard_input(update: Update, context: ContextTypes.DEFAULT_TYP
     if state["expires"] < _dt.datetime.now().timestamp():
         _wizard.pop(chat_id, None)
         state["handle"].kill()
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             "⌛ That sign-in expired. Run /start to try again.",
             "⌛ Sign-in itu sudah kedaluwarsa. Jalankan /start untuk coba lagi.",
         ))
         return True
 
-    text = (update.message.text or "").strip()
+    text = (_msg(update).text or "").strip()
     if text.lower() in ("/cancel", "cancel", "batal"):
         _wizard.pop(chat_id, None)
         state["handle"].kill()
-        await update.message.reply_text(_t(lang, "✖️ Sign-in cancelled.", "✖️ Sign-in dibatalkan."))
+        await _msg(update).reply_text(_t(lang, "✖️ Sign-in cancelled.", "✖️ Sign-in dibatalkan."))
         return True
 
     handle, human = state["handle"], state["human"]
     _wizard.pop(chat_id, None)
-    await update.message.reply_text(_t(lang, f"⏳ Sending the code to {human}…", f"⏳ Mengirim kode ke {human}…"))
+    await _msg(update).reply_text(_t(lang, f"⏳ Sending the code to {human}…", f"⏳ Mengirim kode ke {human}…"))
 
     # The code was a chat message and is a credential, however short-lived --
     # take it out of the history now rather than leaving it sitting there.
     try:
-        await update.message.delete()
+        await _msg(update).delete()
     except Exception:
         logger.info("could not delete the code message (needs admin rights in groups)")
 
@@ -6014,7 +6673,7 @@ async def _handle_wizard_input(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as exc:
         logger.exception("login completion failed")
         handle.kill()
-        await update.message.reply_text(_t(lang, f"⚠️ Sign-in failed: {exc}", f"⚠️ Sign-in gagal: {exc}"))
+        await _msg(update).reply_text(_t(lang, f"⚠️ Sign-in failed: {exc}", f"⚠️ Sign-in gagal: {exc}"))
         return True
     handle.kill()
 
@@ -6022,12 +6681,12 @@ async def _handle_wizard_input(update: Update, context: ContextTypes.DEFAULT_TYP
         provider = "agy" if "Antigravity" in human else "claude"
         _mark_setup(provider, update.effective_user.id)
         logger.warning("%s sign-in completed by user=%s", human, update.effective_user.id)
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             f"✅ <b>{human} signed in.</b>\n\nRun /start to see what's left.",
             f"✅ <b>{human} sudah sign-in.</b>\n\nJalankan /start untuk lihat sisanya.",
         ), parse_mode="HTML")
     else:
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             f"⚠️ {human} didn't accept that code. It may have expired — codes are "
             f"short-lived, so grabbing a fresh one usually fixes it.\n\n"
             f"<pre>{_tg_escape(screen[-500:])}</pre>\n\nRun /start to retry.",
@@ -6132,9 +6791,9 @@ async def cmd_update_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     lang = _chat_lang(update)
     if not await _may_authorize_group_action(update, context):
-        await query.answer(_t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
+        await _safe_answer(query, _t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
         return
-    await query.answer()
+    await _safe_answer(query)
     choice = query.data.split(":", 1)[1]
     if choice == "no":
         await query.edit_message_text(_t(lang,
@@ -6647,7 +7306,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         cancelled.append(_t(lang, "the Google Drive connect",
                                   "penghubungan Google Drive"))
 
-    if _server_wizard.pop(chat_id, None) is not None:
+    if _drop_server_wizard(chat_id) is not None:
         cancelled.append(_t(lang, "adding a server", "penambahan server"))
 
     if cancelled:
@@ -6887,10 +7546,10 @@ async def cmd_help_lang_chosen(update: Update, context: ContextTypes.DEFAULT_TYP
     """Callback for the /help language-picker buttons."""
     query = update.callback_query
     if not _authorized(update):
-        await query.answer()
+        await _safe_answer(query)
         return
     text = HELP_TEXT_ID if query.data == "help_id" else HELP_TEXT_EN
-    await query.answer()
+    await _safe_answer(query)
     chunks = _split_for_telegram(text)
     # An edit can only ever hold ONE message's worth of text -- the language
     # picker's own message becomes the first chunk, and the rest (if any)
@@ -7077,6 +7736,38 @@ async def cmd_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     cap = _effective_unlock_cap(update)
+    # Already open? Then this is not a new authorisation, it is someone
+    # checking or wanting more time -- so say what is left and offer to extend,
+    # rather than putting the PIN keypad up again. Fourteen unlocks were
+    # recorded in one day, most of them this exact situation.
+    open_until = write_mode_expires_at()
+    if open_until:
+        left = int((open_until - _dt.datetime.now().timestamp()) / 60) + 1
+        session_left = write_mode_session_left(cap)
+        rows = []
+        if session_left > 1:
+            add = min(WRITE_MODE_DEFAULT_MINUTES, session_left)
+            rows = [[InlineKeyboardButton(
+                _t(lang, f"➕ Extend {add} min", f"➕ Perpanjang {add} menit"),
+                callback_data=f"extend_write:{add}")]]
+        await _msg(update).reply_text(
+            _t(lang,
+               f"🔓 Write mode is already open — about <b>{left} minute(s)</b> left.\n"
+               f"No second PIN needed."
+               + (f" You can extend up to {session_left} more minute(s) on this "
+                  f"session." if session_left > 1 else
+                  " This session has used its full window; /lock then /unlock "
+                  "for a new one."),
+               f"🔓 Write mode masih terbuka — sisa sekitar <b>{left} menit</b>.\n"
+               f"Tidak perlu PIN lagi."
+               + (f" Bisa diperpanjang sampai {session_left} menit lagi di sesi "
+                  f"ini." if session_left > 1 else
+                  " Sesi ini sudah memakai jatah penuhnya; /lock lalu /unlock "
+                  "untuk sesi baru."),
+            ),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(rows) if rows else None)
+        return
     minutes = min(WRITE_MODE_DEFAULT_MINUTES, cap)
     if context.args:
         try:
@@ -7098,6 +7789,48 @@ async def cmd_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
            f"🔓 Konfirmasi buka write mode untuk {min(minutes, cap)} menit.",
         ),
     )
+
+
+async def cmd_extend_write_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Push out an open write window WITHOUT asking for the PIN again.
+
+    The PIN authorised a session, not a stopwatch. Infrastructure work runs for
+    hours, and re-entering the PIN every half hour does not make anything safer
+    -- it makes the prompt something people clear without reading, which is the
+    opposite of what it is for.
+
+    What keeps this bounded is unlock_write_mode(extend=True): the ceiling is
+    measured from the ORIGINAL unlock, so extensions cannot chain past it. When
+    the session has spent its whole ceiling, a fresh PIN is required.
+    """
+    query = update.callback_query
+    await _safe_answer(query)
+    lang = _chat_lang(update)
+    if not await _may_authorize_group_action(update, context):
+        return
+    if not write_mode_expires_at():
+        await query.edit_message_text(_t(lang,
+            "🔒 The window already closed. /unlock to open a new one.",
+            "🔒 Jendelanya sudah tertutup. /unlock untuk membuka yang baru."))
+        return
+    cap = _effective_unlock_cap(update)
+    try:
+        asked = int(query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        asked = WRITE_MODE_DEFAULT_MINUTES
+    room = write_mode_session_left(cap)
+    if room < 1:
+        await query.edit_message_text(_t(lang,
+            "⏳ This session has used its full window. /lock then /unlock for a new one.",
+            "⏳ Sesi ini sudah memakai jatah penuhnya. /lock lalu /unlock untuk sesi baru."))
+        return
+    until = unlock_write_mode(min(asked, room), max_minutes=cap, extend=True)
+    left = int((until - _dt.datetime.now().timestamp()) / 60) + 1
+    await query.edit_message_text(_t(lang,
+        f"🔓 Extended — about {left} minute(s) of write access left. No PIN needed: "
+        f"same session.",
+        f"🔓 Diperpanjang — sisa sekitar {left} menit akses tulis. Tanpa PIN: "
+        f"masih sesi yang sama."))
 
 
 async def cmd_lock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -7654,9 +8387,9 @@ async def cmd_gdrive_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     lang = _chat_lang(update)
     if not await _may_authorize_group_action(update, context):
-        await query.answer(_t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
+        await _safe_answer(query, _t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
         return
-    await query.answer()
+    await _safe_answer(query)
     parts = query.data.split(":", 2)
     # "gdrv:<name>" was the only shape before disconnect existed. Still
     # accepted, so a picker card left sitting in a chat from before an update
@@ -8808,7 +9541,7 @@ async def cmd_pin_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     lang = _chat_lang(update)
     session = _pin_sessions.get(token)
     if not session:
-        await query.answer(_t(lang, "This PIN entry expired — start again.",
+        await _safe_answer(query, _t(lang, "This PIN entry expired — start again.",
                                    "PIN ini sudah kedaluwarsa — mulai lagi."), show_alert=True)
         return
     # Who may drive the keypad depends on the action: a registered group's own
@@ -8824,7 +9557,7 @@ async def cmd_pin_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     else:
         may_touch = _is_owner(update)
     if not may_touch:
-        await query.answer(_t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
+        await _safe_answer(query, _t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
         return
     # ...but the action decides whether this is an acceptable PLACE to do it.
     # Only reachable for an owner outside PIN_ACTIONS_ALLOWED_IN_GROUP now (a
@@ -8833,27 +9566,27 @@ async def cmd_pin_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # would be actively misleading for someone who really is the owner.
     if (session["action"] not in PIN_ACTIONS_ALLOWED_IN_GROUP
             and not _is_trusted_origin(update)):
-        await query.answer(_t(lang,
+        await _safe_answer(query, _t(lang,
             "This action can only be confirmed in a private DM.",
             "Aksi ini cuma bisa dikonfirmasi lewat DM pribadi.",
         ), show_alert=True)
         return
     if session["expires"] < _dt.datetime.now().timestamp():
         _pin_sessions.pop(token, None)
-        await query.answer(_t(lang, "Expired.", "Kedaluwarsa."), show_alert=True)
+        await _safe_answer(query, _t(lang, "Expired.", "Kedaluwarsa."), show_alert=True)
         await query.edit_message_text(_t(lang, "🔢 PIN entry expired.", "🔢 PIN sudah kedaluwarsa."))
         return
 
     if key == "cancel":
         _pin_sessions.pop(token, None)
-        await query.answer()
+        await _safe_answer(query)
         await query.edit_message_text(_t(lang, "✖️ Cancelled.", "✖️ Dibatalkan."))
         return
     if key == "del":
         session["digits"] = session["digits"][:-1]
     elif key.isdigit():
         session["digits"] += key
-    await query.answer()
+    await _safe_answer(query)
 
     header = (query.message.text or "").split("\n🔢")[0].split("\n●")[0].split("\n○")[0]
     header = header.split("\n❌")[0].rstrip() + _t(lang,
@@ -8980,7 +9713,9 @@ async def _pin_verified(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     if action == "addserver":
-        await _begin_addserver(update, query)
+        # payload carries a prefill when the operator got here from the
+        # unknown-host card rather than by typing /addserver.
+        await _begin_addserver(update, query, prefill=(payload or {}).get("prefill"))
         return
 
     if action == "gdrive_mutate":
@@ -9286,24 +10021,24 @@ async def cmd_schedule_decision(update: Update, context: ContextTypes.DEFAULT_TY
     action, _, token = query.data.partition(":")
     lang = _chat_lang(update)
     if not await _may_authorize_group_action(update, context):
-        await query.answer(_t(lang, "Bot owner, or a registered group's own admin.",
+        await _safe_answer(query, _t(lang, "Bot owner, or a registered group's own admin.",
                                    "Pemilik bot, atau admin dari grup yang sudah terdaftar."), show_alert=True)
         return
     item = _pending_schedules.pop(token, None)
     if not item:
-        await query.answer()
+        await _safe_answer(query)
         await query.edit_message_text(_t(lang,
             "That proposal has expired — ask again if you still want it.",
             "Proposal itu sudah kedaluwarsa — minta lagi kalau masih mau.",
         ))
         return
     if action == "sched_no":
-        await query.answer()
+        await _safe_answer(query)
         await query.edit_message_text(_t(lang, f"✖️ Not installed: {item['name']}", f"✖️ Tidak dipasang: {item['name']}"))
         return
     # The tap alone is not the authorisation. It only says WHICH proposal; the
     # PIN says a person -- not just a logged-in device -- actually wants it.
-    await query.answer()
+    await _safe_answer(query)
     await query.edit_message_text(_t(lang,
         f"🗓 Installing <b>{_tg_escape(item['name'])}</b> — confirm with your PIN.",
         f"🗓 Memasang <b>{_tg_escape(item['name'])}</b> — konfirmasi dengan PIN.",
@@ -9476,6 +10211,91 @@ async def cmd_providers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await _reply_chunked(update, "\n".join(lines), already_html=True)
 
 
+_pending_newhost: dict[int, dict] = {}      # chat_id -> {"host", "hints", "text"}
+
+
+async def offer_register_host(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                              host: str, hints: dict, text: str) -> None:
+    """Ask whether an unknown machine should be registered, before answering.
+
+    Shown INSTEAD of running the model, not alongside it. Two reasons: the model
+    cannot do anything useful with a machine it has no key for, and a turn that
+    was always going to fail still costs a turn -- median 29s and real tokens on
+    this deployment.
+    """
+    lang = _chat_lang(update)
+    _pending_newhost[update.effective_chat.id] = {
+        "host": host, "hints": hints, "text": text,
+        "expires": _dt.datetime.now().timestamp() + SERVER_WIZARD_TTL,
+    }
+    bits = []
+    if hints.get("port"):
+        bits.append(f"port {hints['port']}")
+    if hints.get("user"):
+        bits.append(f"user {hints['user']}")
+    detail = (" — " + ", ".join(bits)) if bits else ""
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(_t(lang, "➕ Register it", "➕ Daftarkan"),
+                              callback_data="newhost:reg")],
+        [InlineKeyboardButton(_t(lang, "💬 Just answer", "💬 Jawab saja"),
+                              callback_data="newhost:skip")],
+        [InlineKeyboardButton(_t(lang, "✖️ Cancel", "✖️ Batal"),
+                              callback_data="newhost:cancel")],
+    ])
+    await _msg(update).reply_text(
+        _t(lang,
+           f"🆕 <b>{_tg_escape(host)}</b>{_tg_escape(detail)} is not in the "
+           f"inventory yet.\n\nI have no key there, so I cannot reach it. "
+           f"Register it now?",
+           f"🆕 <b>{_tg_escape(host)}</b>{_tg_escape(detail)} belum ada di "
+           f"inventaris.\n\nSaya belum punya kunci di sana, jadi belum bisa "
+           f"menjangkaunya. Daftarkan sekarang?"),
+        parse_mode="HTML", reply_markup=kb)
+
+
+async def cmd_newhost_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Answer to the unknown-host card."""
+    query = update.callback_query
+    await _safe_answer(query)
+    lang = _chat_lang(update)
+    chat_id = update.effective_chat.id
+    pending = _pending_newhost.get(chat_id)
+    action = query.data.split(":", 1)[1]
+
+    if action == "cancel" or not pending:
+        _pending_newhost.pop(chat_id, None)
+        await query.edit_message_text(_t(lang, "✖️ Dropped.", "✖️ Dibatalkan."))
+        return
+
+    if action == "skip":
+        # Answer the question without registering. No PIN here on purpose: this
+        # path grants nothing. The agent stays read-only, and if it turns out it
+        # must change something it emits NEEDS_WRITE and the PIN appears then --
+        # the existing, tested gate, rather than a second prompt that teaches
+        # people to tap through.
+        _pending_newhost.pop(chat_id, None)
+        await query.edit_message_text(_t(lang,
+            "💬 Answering without registering. I still have no access there.",
+            "💬 Dijawab tanpa didaftarkan. Saya tetap belum punya akses ke sana."))
+        await _run_turn(update, context, pending["text"])
+        return
+
+    if action == "reg":
+        if not _is_owner(update) and not await _is_group_admin(update, context):
+            await query.edit_message_text(_t(lang,
+                "🔒 Bot owner or a group admin only.",
+                "🔒 Cuma pemilik bot atau admin grup."))
+            return
+        prefill = {"host": pending["host"], **pending["hints"]}
+        _pending_newhost.pop(chat_id, None)
+        if pin_is_set(chat_id):
+            await request_pin(update, "addserver", {"prefill": prefill},
+                              _t(lang, f"➕ Registering {pending['host']}.",
+                                       f"➕ Mendaftarkan {pending['host']}."))
+        else:
+            await _begin_addserver(update, query=query, prefill=prefill)
+
+
 async def cmd_addserver(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Register a machine the agent may reach. PIN first -- this grants access."""
     if not _may_run_setup(update):
@@ -9501,11 +10321,16 @@ async def cmd_addserver(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _begin_addserver(update)
 
 
-async def _begin_addserver(update: Update, query=None) -> None:
+async def _begin_addserver(update: Update, query=None, prefill: Optional[dict] = None) -> None:
+    # `prefill` carries what the operator already typed in plain language --
+    # "fix the app on 192.0.2.10, ssh port 222, user root". Re-asking for
+    # details that were in the first message is most of what made this feel
+    # heavy, and none of it is information the wizard has to hear twice.
     _server_wizard[update.effective_chat.id] = {
-        "step": "kind", "data": {},
+        "step": "kind", "data": dict(prefill or {}),
         "expires": _dt.datetime.now().timestamp() + SERVER_WIZARD_TTL,
     }
+    _save_server_wizard()
     lang = _chat_lang(update)
     kb = InlineKeyboardMarkup(
         [[InlineKeyboardButton(label, callback_data=f"srv:kind:{key}")]
@@ -9526,12 +10351,12 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     _, action, value = query.data.split(":", 2)
     chat_id = update.effective_chat.id
     if not _may_run_setup(update):
-        await query.answer(_t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
+        await _safe_answer(query, _t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
         return
-    await query.answer()
+    await _safe_answer(query)
 
     if action == "cancel":
-        _server_wizard.pop(chat_id, None)
+        _drop_server_wizard(chat_id)
         await query.edit_message_text(_t(lang, "✖️ Cancelled. Nothing was saved.",
                                               "✖️ Dibatalkan. Tidak ada yang disimpan."))
         return
@@ -9547,6 +10372,7 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         data["kind"] = value
         if value == "hypervisor":
             state["step"] = "flavour"
+            _save_server_wizard()
             await query.edit_message_text(
                 _t(lang, "➕ <b>Add a server</b>\n\nWhich hypervisor?",
                          "➕ <b>Tambah server</b>\n\nHypervisor yang mana?"), parse_mode="HTML",
@@ -9558,18 +10384,21 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
         data["flavour"] = value
         state["step"] = "name"
+        _save_server_wizard()
         await query.edit_message_text(_srv_prompt("name", lang), parse_mode="HTML")
         return
 
     if action == "flavour":
         data["flavour"] = value
         state["step"] = "name"
+        _save_server_wizard()
         await query.edit_message_text(_srv_prompt("name", lang), parse_mode="HTML")
         return
 
     if action == "cluster":
         data["cluster_wide"] = (value == "yes")
         state["step"] = "discover"
+        _save_server_wizard()
         if data.get("flavour") != "proxmox":
             await _finish_addserver(update, query)
             return
@@ -9610,6 +10439,7 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         data["probe"] = data.get("probe") or "connected (unprotected)"
         if data.get("flavour") == "proxmox":
             state["step"] = "cluster"
+            _save_server_wizard()
             await query.edit_message_text(_t(lang,
                 "Added without protection. Does this same key reach every node?",
                 "Ditambahkan tanpa perlindungan. Apakah key yang sama menjangkau semua node?"),
@@ -9619,6 +10449,39 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 ]]))
         else:
             await _finish_addserver(update, query)
+        return
+
+    if action == "usepw":
+        # Ask for the password only where the bot can clear it again. Finding
+        # out afterwards that it cannot is finding out too late.
+        if not await bot_can_delete_here(update, context):
+            await query.edit_message_text(_t(lang,
+                "🔒 I can only take a password where I am able to delete your "
+                "message again. Here I cannot.\n\nEither continue in a private "
+                "chat with me, or make me an admin in this group with "
+                "<b>Delete messages</b> — I do not need to add or remove members.",
+                "🔒 Saya hanya mau menerima password di tempat yang pesannya bisa "
+                "saya hapus lagi. Di sini saya tidak bisa.\n\nLanjutkan di chat "
+                "pribadi dengan saya, atau jadikan saya admin di grup ini dengan "
+                "izin <b>Hapus pesan</b> — saya tidak butuh izin menambah atau "
+                "mengeluarkan anggota."), parse_mode="HTML")
+            return
+        state["step"] = "password"
+        _save_server_wizard()
+        await query.edit_message_text(_t(lang,
+            f"🔐 Send the <b>{_tg_escape(data['user'])}</b> password for "
+            f"<b>{_tg_escape(data['host'])}</b> as your next message.\n\n"
+            "I delete it the moment it arrives, use it once to place my key, "
+            "and never write it anywhere. It still passes through Telegram to "
+            "get here — so change it afterwards, or use a temporary one.\n\n"
+            "/cancel to stop.",
+            f"🔐 Kirim password <b>{_tg_escape(data['user'])}</b> untuk "
+            f"<b>{_tg_escape(data['host'])}</b> sebagai pesan berikutnya.\n\n"
+            "Saya hapus begitu masuk, dipakai sekali untuk menaruh kunci saya, "
+            "dan tidak pernah ditulis ke mana pun. Tapi ia tetap melewati "
+            "Telegram untuk sampai ke sini — jadi ganti setelahnya, atau pakai "
+            "password sementara.\n\n"
+            "/cancel untuk berhenti."), parse_mode="HTML")
         return
 
     if action == "test":
@@ -9690,6 +10553,7 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         data["probe"] = detail
         if data.get("flavour") == "proxmox":
             state["step"] = "cluster"
+            _save_server_wizard()
             await query.edit_message_text(
                 _t(lang,
                    f"✅ Connected. <code>{_tg_escape(detail)}</code>\n\n"
@@ -9738,80 +10602,135 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
     state = _server_wizard.get(chat_id)
     lang = _chat_lang(update)
     if state and state["step"] == "authorize":
-        text = (update.message.text or "").strip()
+        text = (_msg(update).text or "").strip()
         if text.lower().startswith("usekey "):
             name = text.split(None, 1)[1].strip()
             key = Path.home() / ".ssh" / name
             if not key.exists() or not key.with_suffix(".pub").exists():
-                await update.message.reply_text(_t(lang,
+                await _msg(update).reply_text(_t(lang,
                     f"No keypair named '{name}' on this host. Send just the name, without .pub",
                     f"Tidak ada keypair bernama '{name}' di host ini. Kirim namanya saja, tanpa .pub",
                 ))
                 return True
             state["data"]["key"] = str(key)
-            await update.message.reply_text(_t(lang,
+            await _msg(update).reply_text(_t(lang,
                 f"🔑 Using <code>{_tg_escape(name)}</code>. Tap Test above.",
                 f"🔑 Memakai <code>{_tg_escape(name)}</code>. Tap Test di atas.",
             ), parse_mode="HTML")
             return True
         return False
+    if state and state["step"] == "password":
+        # Delete FIRST. Everything after this can fail; the message sitting in
+        # the chat is the one thing that must not survive a failure.
+        pw = (_msg(update).text or "")
+        try:
+            await _msg(update).delete()
+            cleared = True
+        except Exception:
+            cleared = False
+            logger.warning("could not delete the password message")
+        if pw.strip().lower() in ("/cancel", "cancel", "batal"):
+            _drop_server_wizard(chat_id)
+            await _msg(update).reply_text(_t(lang, "✖️ Cancelled. Nothing was saved.",
+                                                   "✖️ Dibatalkan. Tidak ada yang disimpan."))
+            return True
+        data = state["data"]
+        note = "" if cleared else _t(lang,
+            "\n\n⚠️ I could not delete your message — delete it yourself.",
+            "\n\n⚠️ Pesan Anda tidak bisa saya hapus — tolong hapus sendiri.")
+        await _msg(update).reply_text(_t(lang,
+            f"🔐 Placing my key on {_tg_escape(data['host'])}…{note}",
+            f"🔐 Memasang kunci saya di {_tg_escape(data['host'])}…{note}"),
+            parse_mode="HTML")
+        ok, detail = await asyncio.get_running_loop().run_in_executor(
+            None, bootstrap_key_with_password,
+            data["host"], data["user"], int(data.get("port") or 22), pw)
+        del pw          # not kept a moment longer than the call needs it
+        if not ok:
+            state["step"] = "authorize"
+            _save_server_wizard()
+            await _msg(update).reply_text(_t(lang,
+                f"⚠️ That did not work: {_tg_escape(detail)}\n\n"
+                "Try the button again, or authorise the key by hand.",
+                f"⚠️ Belum berhasil: {_tg_escape(detail)}\n\n"
+                "Coba tombolnya lagi, atau otorisasi kuncinya manual."),
+                parse_mode="HTML")
+            return True
+        state["step"] = "authorize"
+        _save_server_wizard()
+        await _msg(update).reply_text(_t(lang,
+            f"✅ Key installed and verified on {_tg_escape(data['host'])} "
+            f"({_tg_escape(detail)}).\n\n"
+            "<b>Change that password now</b> — it travelled through Telegram to "
+            "reach me. I never stored it.\n\nTap Test to finish registering.",
+            f"✅ Kunci terpasang dan terverifikasi di {_tg_escape(data['host'])} "
+            f"({_tg_escape(detail)}).\n\n"
+            "<b>Ganti password itu sekarang</b> — ia melewati Telegram untuk "
+            "sampai ke saya. Saya tidak pernah menyimpannya.\n\n"
+            "Tap Tes untuk menyelesaikan pendaftaran."), parse_mode="HTML")
+        return True
+
     if not state or state["step"] not in ("name", "host", "user", "port"):
         return False
     if state["expires"] < _dt.datetime.now().timestamp():
-        _server_wizard.pop(chat_id, None)
-        await update.message.reply_text(_t(lang, "⌛ That form expired. Run /addserver again.",
+        _drop_server_wizard(chat_id)
+        await _msg(update).reply_text(_t(lang, "⌛ That form expired. Run /addserver again.",
                                               "⌛ Form itu sudah kedaluwarsa. Jalankan /addserver lagi."))
         return True
 
-    text = (update.message.text or "").strip()
+    text = (_msg(update).text or "").strip()
     if text.lower() in ("/cancel", "cancel", "batal"):
-        _server_wizard.pop(chat_id, None)
-        await update.message.reply_text(_t(lang, "✖️ Cancelled. Nothing was saved.",
+        _drop_server_wizard(chat_id)
+        await _msg(update).reply_text(_t(lang, "✖️ Cancelled. Nothing was saved.",
                                               "✖️ Dibatalkan. Tidak ada yang disimpan."))
         return True
 
     step, data = state["step"], state["data"]
     if step == "name":
         if not _NAME_RE.match(text):
-            await update.message.reply_text(_t(lang, "Lowercase letters, digits, - and _ only. Try again.",
+            await _msg(update).reply_text(_t(lang, "Lowercase letters, digits, - and _ only. Try again.",
                                                   "Huruf kecil, angka, - dan _ saja. Coba lagi."))
             return True
         if any(s["name"] == text for s in _read_servers()):
-            await update.message.reply_text(_t(lang, f"'{text}' already exists. Pick another name.",
+            await _msg(update).reply_text(_t(lang, f"'{text}' already exists. Pick another name.",
                                                   f"'{text}' sudah ada. Pilih nama lain."))
             return True
         data["name"] = text
         state["step"] = "host"
-        await update.message.reply_text(_srv_prompt("host", lang), parse_mode="HTML")
+        _save_server_wizard()
+        await _msg(update).reply_text(_srv_prompt("host", lang), parse_mode="HTML")
         return True
 
     if step == "host":
         if not _HOST_RE.match(text):
-            await update.message.reply_text(_t(lang, "That doesn't look like an IP or hostname. Try again.",
+            await _msg(update).reply_text(_t(lang, "That doesn't look like an IP or hostname. Try again.",
                                                   "Itu tidak seperti IP atau hostname. Coba lagi."))
             return True
         data["host"] = text
         state["step"] = "user"
-        await update.message.reply_text(_srv_prompt("user", lang), parse_mode="HTML")
+        _save_server_wizard()
+        await _msg(update).reply_text(_srv_prompt("user", lang), parse_mode="HTML")
         return True
 
     if step == "user":
         if not re.match(r"^[a-z_][a-z0-9_-]{0,31}$", text):
-            await update.message.reply_text(_t(lang, "That doesn't look like a username. Try again.",
+            await _msg(update).reply_text(_t(lang, "That doesn't look like a username. Try again.",
                                                   "Itu tidak seperti username. Coba lagi."))
             return True
         data["user"] = text
         state["step"] = "port"
-        await update.message.reply_text(_srv_prompt("port", lang), parse_mode="HTML")
+        _save_server_wizard()
+        await _msg(update).reply_text(_srv_prompt("port", lang), parse_mode="HTML")
         return True
 
     # port -> show the public key and wait for them to install it
     if not text.isdigit() or not (1 <= int(text) <= 65535):
-        await update.message.reply_text(_t(lang, "Port must be a number between 1 and 65535.",
+        await _msg(update).reply_text(_t(lang, "Port must be a number between 1 and 65535.",
                                               "Port harus angka antara 1 dan 65535."))
         return True
     data["port"] = int(text)
     state["step"] = "authorize"
+    _save_server_wizard()
 
     loop = asyncio.get_running_loop()
     try:
@@ -9824,8 +10743,8 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     except Exception as exc:
         logger.exception("could not prepare the agent keypair")
-        _server_wizard.pop(chat_id, None)
-        await update.message.reply_text(_t(lang,
+        _drop_server_wizard(chat_id)
+        await _msg(update).reply_text(_t(lang,
             f"⚠️ Couldn't prepare an SSH key: {exc}",
             f"⚠️ Gagal siapkan SSH key: {exc}",
         ))
@@ -9837,7 +10756,7 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
     # opposite -- an unguarded key whose NAME says read-only.
     if _keys_configured():
         pubkey = SSH_RW_KEY.with_suffix(".pub").read_text().strip()
-    await update.message.reply_text(
+    await _msg(update).reply_text(
         _t(lang,
            f"🔑 <b>Authorise the agent on {_tg_escape(data['host'])}</b>\n\n"
            "Run this <b>on that machine</b>, as "
@@ -9857,16 +10776,22 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
            "key di chat.</i>\n\nLalu tap Test.",
         ),
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(_t(lang, "🔌 Test connection", "🔌 Tes koneksi"), callback_data="srv:test:"),
-            InlineKeyboardButton(_t(lang, "✖️ Cancel", "✖️ Batal"), callback_data="srv:cancel:"),
-        ]]),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                _t(lang, "🔐 Install it for me (password once)",
+                         "🔐 Pasangkan saja (password sekali)"),
+                callback_data="srv:usepw:")],
+            [InlineKeyboardButton(_t(lang, "🔌 Test connection", "🔌 Tes koneksi"),
+                                  callback_data="srv:test:"),
+             InlineKeyboardButton(_t(lang, "✖️ Cancel", "✖️ Batal"),
+                                  callback_data="srv:cancel:")],
+        ]),
     )
     if others:
         # Already have a key that reaches this machine? Say so instead of
         # installing a second one. The key itself never moves through chat --
         # you pick a name, and the file stays on this host.
-        await update.message.reply_text(
+        await _msg(update).reply_text(
             _t(lang,
                "🔑 <i>Already have a key that reaches it?</i> These are on this host:\n",
                "🔑 <i>Sudah punya key yang bisa menjangkaunya?</i> Ini yang ada di host ini:\n",
@@ -9888,7 +10813,7 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def _finish_addserver(update: Update, query, discovery: str = "") -> None:
     chat_id = update.effective_chat.id
-    state = _server_wizard.pop(chat_id, None)
+    state = _drop_server_wizard(chat_id)
     if not state:
         return
     data = state["data"]
@@ -9933,6 +10858,17 @@ async def _finish_addserver(update: Update, query, discovery: str = "") -> None:
         "\nSudah ada di <code>~/.ssh/config</code> dan tercatat di brief agent, "
         "jadi bisa dijangkau mulai pesan berikutnya.\n\n/servers untuk melihat lagi.",
     )
+    # Only when it is actually still open. Advice that arrives on a host that
+    # is already key-only is noise, and noise is what teaches people to skip
+    # the paragraph that matters. Asked of sshd itself, over the key that was
+    # just proven to work.
+    try:
+        still_open = await asyncio.get_running_loop().run_in_executor(
+            None, password_auth_state, data["host"], data["user"], int(data["port"]))
+    except Exception:
+        still_open = None
+    if still_open:
+        msg += harden_ssh_advice(lang)
     await query.edit_message_text(msg, parse_mode="HTML")
 
 
@@ -10198,7 +11134,11 @@ async def offer_unlock(update: Update, reason: str, original_prompt: str,
             "\n\n<i>Saya tidak bisa tahu VM mana yang dimaksud, jadi tidak ada tawaran "
             "snapshot. Snapshot sendiri dulu kalau itu penting.</i>",
         ) + note
-    await update.message.reply_text(
+    # _msg(), not update.message: this is reached from _do_unlock_and_resume,
+    # which runs inside a BUTTON callback, where update.message is always None.
+    # It crashed there for real -- twice last night, taking the whole turn down
+    # after the work had already been done.
+    await _msg(update).reply_text(
         _t(lang,
            f"🔒 <b>The agent needs write access.</b>\n\n"
            f"It wants to: <b>{_tg_escape(reason[:300])}</b>\n\n"
@@ -10216,17 +11156,17 @@ async def cmd_needwrite_button(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id = update.effective_chat.id
     lang = _chat_lang(update)
     if not await _may_authorize_group_action(update, context):
-        await query.answer(_t(lang, "Bot owner, or a registered group's own admin.",
+        await _safe_answer(query, _t(lang, "Bot owner, or a registered group's own admin.",
                                    "Pemilik bot, atau admin dari grup yang sudah terdaftar."), show_alert=True)
         return
     pending = _pending_write.get(chat_id)
     if not pending or pending["expires"] < _dt.datetime.now().timestamp():
         _pending_write.pop(chat_id, None)
-        await query.answer()
+        await _safe_answer(query)
         await query.edit_message_text(_t(lang, "That request expired. Just ask again.",
                                                "Permintaan itu sudah kedaluwarsa. Minta lagi saja."))
         return
-    await query.answer()
+    await _safe_answer(query)
 
     if choice == "cancel":
         _pending_write.pop(chat_id, None)
@@ -10531,6 +11471,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if await _handle_server_input(update, context):
         return
 
+    # An IPv4 the inventory has never seen. Offer the deterministic wizard
+    # BEFORE the model gets the turn -- it has no key for that machine, so the
+    # turn would only end in a guard refusal and, depending on the model, a
+    # handful of circular retries. Only for owners and group admins: anyone
+    # else could not register it anyway, and a card offering something you
+    # cannot do is worse than no card.
+    if (msg is not None and (msg.text or "")
+            and update.effective_chat.id not in _server_wizard
+            and (_is_owner(update) or await _is_group_admin(update, context))):
+        # A credential typed into the chat is handled FIRST, and in code rather
+        # than by asking a model to notice -- it costs no tokens, it happens on
+        # every message, and unlike an instruction in a brief it cannot be
+        # talked out of firing.
+        if mentions_password(msg.text):
+            deleted = False
+            if await bot_can_delete_here(update, context):
+                try:
+                    await msg.delete()
+                    deleted = True
+                except Exception:
+                    # Rights can be right and the call still fail -- the 48-hour
+                    # limit, a race with the user deleting it first. Say so
+                    # rather than implying it is gone when it is not.
+                    logger.warning("could not delete a message containing a credential")
+            else:
+                logger.warning("no permission to delete a credential in chat=%s",
+                               update.effective_chat.id)
+            await warn_password_in_chat(update, deleted)
+
+        # From here on, work with the SCRUBBED text: the credential must not
+        # reach _pending_newhost, the model, or anything downstream.
+        safe_text = scrub_password(msg.text)
+        unknown = unregistered_hosts_in(safe_text)
+        if unknown:
+            await offer_register_host(update, context, unknown[0],
+                                      parse_host_hints(safe_text), safe_text)
+            return
+        if mentions_password(msg.text):
+            # Warned, nothing else to register: do not hand the credential to a
+            # model as well.
+            return
+
     # An attached image, saved somewhere the model can open. A screenshot with
     # a caption -- "look at this, which one do I pick?" -- used to match no
     # handler at all and vanish without a word, which is the worst way for
@@ -10629,6 +11611,13 @@ async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     resume-after-unlock flow, which has no incoming message of its own.
     """
     chat_id = str(update.effective_chat.id)
+    # Was write mode already open when this turn STARTED? The re-offer at the
+    # end must not fire for a turn the operator already authorized. Checked
+    # here rather than at the end because a long turn can outlive its own
+    # window -- which is exactly what happened: unlocked at 23:06:50 for ten
+    # minutes, turn finished at 23:25:01, and the end-of-turn check saw a
+    # closed window and asked for the PIN all over again.
+    write_open_at_start = write_mode_expires_at() is not None
 
     sessions = load_sessions()
     state = get_chat_state(sessions, chat_id)
@@ -10646,6 +11635,11 @@ async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     started = _dt.datetime.now()
 
     lang = _chat_lang(update)
+    # One "still working" line, edited in place, while the model runs. Started
+    # here and cancelled in the finally below so it can never outlive its turn.
+    beat = asyncio.create_task(_progress_heartbeat(
+        context, update.effective_chat.id, lang, started,
+        _effective_unlock_cap(update)))
     try:
         # run_combo shells out to agy/claude and blocks for minutes at a time
         # -- one live turn was measured at 4m35s. Called directly, as it was
@@ -10660,8 +11654,18 @@ async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         )
     except Exception as exc:
         logger.exception("combo run failed")
-        await update.message.reply_text(_t(lang, f"⚠️ Error: {exc}", f"⚠️ Error: {exc}"))
+        # _msg(), not update.message: this path is reachable from the
+        # unlock-and-resume button and from an edited message, where
+        # update.message is None -- the same shape that took down two turns
+        # last night in offer_unlock and _reply_chunked.
+        target = _msg(update)
+        if target is not None:
+            await target.reply_text(_t(lang, f"⚠️ Error: {exc}", f"⚠️ Error: {exc}"))
         return
+    finally:
+        # Always: the heartbeat must not outlive the turn it reports on, on
+        # the error path or the success one.
+        beat.cancel()
 
     # Gemini's own session can die silently between turns (see
     # _agy_attempt_needs_reauth) -- the chain already failed over to Claude for
@@ -10815,7 +11819,9 @@ async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, te
                 # Visible, not silent: auto-writes the user can't see are how a
                 # brief quietly drifts away from what they think it says.
                 bullets = "\n".join(f"• {_tg_escape(f)}" for f in newly_learned)
-                await update.message.reply_text(_t(lang,
+                # _msg(): inside the delivery block, reachable from a resumed
+                # turn (button) and from an edited message.
+                await _msg(update).reply_text(_t(lang,
                     f"🧠 <i>Recorded to environment knowledge ({len(newly_learned)} new):</i>\n{bullets}",
                     f"🧠 <i>Dicatat ke pengetahuan lingkungan ({len(newly_learned)} baru):</i>\n{bullets}",
                 ), parse_mode="HTML")
@@ -10829,7 +11835,11 @@ async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, te
                 await asyncio.sleep(3)
             else:
                 try:
-                    await update.message.reply_text(_t(lang,
+                    # THE line behind "even the failure notice couldn't be
+                    # delivered" in the 10:03 and 10:05 logs: the notice that
+                    # reports a failed delivery reached for the same None
+                    # target that had just caused the failure.
+                    await _msg(update).reply_text(_t(lang,
                         "⚠️ The answer finished processing but couldn't be delivered "
                         "(connection issue reaching Telegram). Please resend the same message.",
                         "⚠️ Jawaban sudah selesai diproses tapi gagal dikirim (masalah koneksi "
@@ -10851,10 +11861,28 @@ async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     # Refused by the node guard? Offer to unlock (snapshotting first if the
     # operator wants) and re-run. Nothing is guessed from the wording of the
     # request -- the guard already decided; we are only reacting to it.
+    wants_write = (needs_write
+                   or blocked_by_readonly(result.get("result") or "", attempts))
+    if write_open_at_start and wants_write and not write_mode_expires_at():
+        # Authorized when it started, expired while it ran. Say so in one line
+        # instead of putting up a second unlock card -- the operator already
+        # answered this question for this piece of work, and asking again is
+        # how a security prompt turns into a reflex.
+        # A separate line, not appended to cost_note: the reply itself already
+        # went out ~60 lines above, so anything added to that string now would
+        # be written and never sent.
+        logger.warning("write window expired mid-turn (chat=%s)", chat_id)
+        target = _msg(update)
+        if target is not None:
+            await target.reply_text(_t(lang,
+                "🔓 The write window closed while this was still running. "
+                "/unlock again to finish it.",
+                "🔓 Jendela write tertutup saat ini masih berjalan. "
+                "/unlock lagi untuk menyelesaikannya."))
     if (await _may_authorize_group_action(update, context) and _keys_configured()
             and not write_mode_expires_at()
-            and (needs_write
-                 or blocked_by_readonly(result.get("result") or "", attempts))):
+            and not write_open_at_start
+            and wants_write):
         await offer_unlock(
             update,
             needs_write or "make a change it was blocked from making",
@@ -10957,6 +11985,18 @@ def main() -> None:
 
     async def _announce_update(application) -> None:
         """One shot, on startup, only if an update just restarted us."""
+        # Reaching post_init is the proof the boot guard is waiting for: the
+        # token was accepted and the application initialised. Disarm BEFORE the
+        # early return below -- a start with nothing to announce is still a
+        # start, and leaving the guard armed would roll back a healthy build
+        # the next time the service is restarted for any reason at all.
+        try:
+            state = _read_update_state()
+            if state.pop("rollback_to", None) is not None or state.get("boot_attempts"):
+                state["boot_attempts"] = 0
+                _write_update_state(state)
+        except OSError:
+            logger.warning("could not disarm the boot guard", exc_info=True)
         if not UPDATE_ANNOUNCE_FILE.exists():
             return
         try:
@@ -10967,6 +12007,33 @@ def main() -> None:
             return
         UPDATE_ANNOUNCE_FILE.unlink(missing_ok=True)
         lang = info.get("lang", DEFAULT_LANGUAGE)
+        if info.get("rolled_back"):
+            # The operator pressed update, watched it say "restarting", and
+            # then heard nothing. Say plainly what happened, and say what was
+            # NOT touched -- the first fear on seeing this is losing the PIN
+            # and the server list.
+            failed = _tg_escape(str(info.get("failed", "?")))
+            back_to = _tg_escape(str(info.get("to", "?")))
+            try:
+                await application.bot.send_message(
+                    chat_id=info["chat_id"],
+                    text=_t(lang,
+                        f"\u26a0\ufe0f <b>Rolled back to {back_to}.</b>\n\n"
+                        f"<i>{failed} installed, but would not start. The "
+                        "previous version was restored automatically. Your "
+                        "settings, briefs, sessions and PIN are untouched.</i>"
+                        "\n\nWhy it failed: <code>journalctl -u lite-agent -n 50</code>",
+                        f"\u26a0\ufe0f <b>Dikembalikan ke {back_to}.</b>\n\n"
+                        f"<i>{failed} sudah terpasang, tapi tidak mau hidup. "
+                        "Versi sebelumnya dipulihkan otomatis. Setting, brief, "
+                        "sesi, dan PIN Anda tidak tersentuh.</i>"
+                        "\n\nPenyebabnya: <code>journalctl -u lite-agent -n 50</code>",
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                logger.warning("could not deliver the rollback notice", exc_info=True)
+            return
         try:
             await application.bot.send_message(
                 chat_id=info["chat_id"],
@@ -11051,6 +12118,10 @@ def main() -> None:
     app.add_handler(CommandHandler("gdrivestatus", cmd_gdrivestatus))
     app.add_handler(CallbackQueryHandler(cmd_server_button, pattern="^srv:"))
     app.add_handler(CallbackQueryHandler(cmd_needwrite_button, pattern="^nw:"))
+    app.add_handler(CallbackQueryHandler(cmd_newhost_button,
+                                        pattern="^newhost:"))
+    app.add_handler(CallbackQueryHandler(cmd_extend_write_button,
+                                        pattern="^extend_write:"))
     app.add_handler(CommandHandler("agentstatus", cmd_agentstatus))
     app.add_handler(CommandHandler("providers", cmd_providers))
     app.add_handler(CommandHandler("schedules", cmd_schedules))
@@ -11079,6 +12150,7 @@ def main() -> None:
 
     apply_hardening_on_start()
     logger.info("Lite Agent starting (allowed users: %s)", ALLOWED_USER_IDS or "ANY (no allowlist!)")
+    _load_server_wizard()   # resume any /addserver left mid-flight by a restart
     # drop_pending_updates=False: a transient crash (network blip, etc.) is
     # recovered by systemd's Restart=on-failure in seconds, but with the old
     # True setting, ANY message sent during that gap was silently discarded

@@ -44,8 +44,16 @@ def check(name: str, ok: bool) -> None:
 
 def git(*args: str) -> tuple[bool, str]:
     try:
+        # encoding is explicit, not the platform default. Without it this
+        # decodes as cp1252 on Windows, and the first non-Latin-1 character in
+        # the CHANGELOG -- an em dash is enough -- makes `git show` come back
+        # as None. The tag check then failed on a release that was perfectly
+        # fine, on the machine where it is run before pushing, while passing on
+        # Linux. A gate that is wrong on the machine you check from is worse
+        # than no gate: it teaches you to push past it.
         p = subprocess.run(["git", *args], cwd=str(REPO), capture_output=True,
-                           text=True, timeout=30)
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=30)
         return p.returncode == 0, (p.stdout or "").strip()
     except Exception:
         return False, ""
@@ -73,6 +81,15 @@ readme = (REPO / "README.md").read_text(encoding="utf-8")
 declared = changelog_version(changelog)
 shown = readme_version(readme)
 
+# Committed while still holding merge conflict markers. This happened for real
+# in the iPandu fork: a resolution script died on a Windows encoding error
+# before it wrote the file, and the `git add -A && git commit` that followed ran
+# anyway. Nothing caught it -- the version check below still parsed fine, with
+# `<<<<<<< HEAD` sitting directly above the heading it was reading.
+for doc, body in (("CHANGELOG.md", changelog), ("README.md", readme)):
+    markers = [mk for mk in ("<<<<<<< ", ">>>>>>> ") if mk in body]
+    check(f"{doc} carries no unresolved merge conflict", not markers)
+
 check("CHANGELOG.md has a parseable version heading", bool(declared))
 check("README.md has a parseable status version", bool(shown))
 check(f"README and CHANGELOG agree (README={shown or '?'}, "
@@ -98,9 +115,22 @@ else:
     # The bot reports git describe verbatim, so this is literally what an
     # operator sees after /update.
     ok_desc, described = git("describe", "--tags", "--always")
-    if ok_desc and notes_are_committed and ok_tag:
+    ok_head, head_sha = git("rev-parse", "HEAD")
+    ok_tsha, tag_sha = git("rev-list", "-n", "1", f"v{declared}")
+    at_the_release = ok_head and ok_tsha and head_sha == tag_sha
+
+    if ok_desc and notes_are_committed and ok_tag and at_the_release:
         check(f"git describe would announce v{declared} (says: {described})",
               described == f"v{declared}")
+    elif ok_desc and notes_are_committed and ok_tag:
+        # HEAD has moved past the release. That is ordinary development, and
+        # demanding an exact match here is what forced every single commit in
+        # this repository to be a release -- 86 tags across 123 commits, and
+        # not one pull request, because an unreleased commit failed the suite.
+        # What still has to hold is that the work sits ON TOP of the declared
+        # version rather than beside it or behind it.
+        check(f"unreleased work sits on top of v{declared} ({described})",
+              described.startswith(f"v{declared}-"))
     else:
         print(f"INFO  - git describe currently says: {described or '(none)'}")
 

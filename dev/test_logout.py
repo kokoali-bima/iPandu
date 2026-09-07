@@ -20,6 +20,9 @@ scratch = Path(tempfile.mkdtemp(prefix="isla_logout_"))
 # assertion still cleans up.
 atexit.register(_shutil.rmtree, str(scratch), ignore_errors=True)
 os.environ["HOME"] = str(scratch)
+# Path.home() ignores HOME on Windows -- USERPROFILE is what it reads,
+# so a suite setting only HOME silently tests the real home there.
+os.environ["USERPROFILE"] = str(scratch)
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "t")
 os.environ.setdefault("ALLOWED_USER_IDS", "111")
 os.environ["ALLOWED_GROUP_IDS"] = ""
@@ -91,7 +94,7 @@ async def main():
     token_dir = scratch / ".gemini" / "antigravity-cli"
     token_dir.mkdir(parents=True)
     token_file = token_dir / "antigravity-oauth-token"
-    token_file.write_text("fake-token-material")
+    token_file.write_text("fake-token-material", encoding="utf-8")
     mod._mark_setup("agy", OWNER)  # simulate /start having marked it done once
     check("setup: agy flag is set before logout", "agy" in mod._setup_state())
 
@@ -106,8 +109,8 @@ async def main():
           "start" in txt_a2.lower())
 
     # --- other files under antigravity-cli survive (only the token is removed) ---
-    (token_dir / "settings.json").write_text("{}")
-    (token_dir / "antigravity-oauth-token").write_text("fake-token-material-2")
+    (token_dir / "settings.json").write_text("{}", encoding="utf-8")
+    (token_dir / "antigravity-oauth-token").write_text("fake-token-material-2", encoding="utf-8")
     mod.logout_agy()
     check("logout_agy leaves OTHER files in the credential dir alone",
           (token_dir / "settings.json").exists())

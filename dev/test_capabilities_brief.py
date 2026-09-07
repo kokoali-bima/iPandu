@@ -34,6 +34,9 @@ SRC = sys.argv[1]
 scratch = Path(tempfile.mkdtemp(prefix="isla_capbrief_"))
 atexit.register(_shutil.rmtree, str(scratch), ignore_errors=True)
 os.environ["HOME"] = str(scratch)
+# Path.home() ignores HOME on Windows -- USERPROFILE is what it reads,
+# so a suite setting only HOME silently tests the real home there.
+os.environ["USERPROFILE"] = str(scratch)
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "t")
 os.environ.setdefault("ALLOWED_USER_IDS", "111")
 os.environ["ALLOWED_GROUP_IDS"] = ""
@@ -74,6 +77,23 @@ check("it carries the measured AV1 finding, so 'cut before encoding' reads "
       "as a fact rather than a preference", "67MB" in brief and "AV1" in brief)
 check("it sets the ~10 second default for a meme or highlight",
       "10 seconds" in brief and "30" in brief)
+
+# --- the write gate and /addserver -----------------------------------------
+# Measured on the itbutler host: registering a Proxmox went smoothly on Gemini
+# and badly on Sonnet, and the logs said why. Across 36 hours there were only
+# TWO write-mode mentions -- Sonnet never emitted NEEDS_WRITE at all. It hit
+# `pve-ro-guard: refused`, treated it as a fault, and went round in circles for
+# ten turns. The brief had never mentioned the write gate, so that was not the
+# model being difficult; it was the model not being told.
+check("the brief explains how to ask for write access", "NEEDS_WRITE:" in brief)
+check("...names the refusal the guard actually prints, so it is recognised "
+      "rather than fought", "pve-ro-guard" in brief)
+check("...and says explicitly not to work around a refusal",
+      "work around" in brief or "retry" in brief)
+check("the brief points at /addserver instead of improvising a registration",
+      "/addserver" in brief)
+check("...and forbids the hand-rolled alternatives that were tried",
+      "authorized_keys" in brief and "password" in brief)
 
 # --- agy: injected when a conversation starts, never on a resumed turn ----
 fresh = mod._build_agy_prompt("hi", include_env=True)

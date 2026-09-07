@@ -16,6 +16,7 @@ would call. Suites that legitimately cannot run here (a missing optional
 dependency, say) are reported as SKIP and do not fail the run -- a skipped
 suite is visible, which is the point; a silently-absent one would not be.
 """
+import os
 import pathlib
 import re
 import subprocess
@@ -81,26 +82,78 @@ try:
 except Exception as exc:
     print(f"  symbol index did not run: {exc}\n")
 
+# The error index is the other half: SYMBOLS.md answers "does this name exist",
+# ERRORS.md answers "has this gone wrong before, and what stops it now". Its
+# exit 3 means a shipped bug lost the test that was guarding it -- which is how
+# the same bug gets released twice -- so it fails the run for the same reason a
+# duplicate name does. Any other failure is the tool's problem, not the code's.
+index_unguarded = False
+try:
+    err = subprocess.run([sys.executable, str(DEV / "error_index.py"), str(SRC)],
+                         capture_output=True, text=True, timeout=60)
+    for line in (err.stdout or "").strip().splitlines():
+        print(f"  {line}")
+    if err.returncode == INDEX_DUPLICATE_EXIT:
+        index_unguarded = True
+    elif err.returncode != 0:
+        print(f"  error index did not run (exit {err.returncode}) -- continuing")
+    print()
+except Exception as exc:
+    print(f"  error index did not run: {exc}\n")
+
 suites = sorted(DEV.glob("test_*.py"))
 if not suites:
     print("no test_*.py found in dev/")
     sys.exit(2)
 
-RESULT_RE = re.compile(r"^(\d+)/(\d+) passed", re.MULTILINE)
+# The LAST tally in the output, not the first. A suite that grew a second
+# summary block -- easy to do when tests are appended after an existing one --
+# reported only the checks above the first one, and the 16 below it were
+# silently uncounted. Taking the final tally is also simply what "the result"
+# means: any earlier line is a partial.
+RESULT_RE = re.compile(r"^(\d+)/(\d+) passed(?:, (\d+) skipped)?",
+                       re.MULTILINE)
+
+
+def _final_tally(text: str):
+    hits = list(RESULT_RE.finditer(text or ""))
+    return hits[-1] if hits else None
+
+# A suite that cannot be parsed is a broken suite, not a skipped one. Kept as a
+# named set so the distinction is a decision on the page rather than a guess
+# buried in a condition.
+BROKEN_SUITE_ERRORS = {"SyntaxError", "IndentationError", "TabError"}
+
 
 passed = failed = skipped = 0
+# Skips INSIDE a suite were invisible here: a suite could drop half its
+# checks on a platform and still print a clean N/N. They are counted
+# separately and shown, so the pre-push threshold can see them too.
+skipped_checks = 0
 failing: list[str] = []
 started = time.monotonic()
 
 for suite in suites:
     name = suite.name
+    # Both ends of the pipe are pinned to UTF-8. Left to the platform
+    # default, a Windows console is cp1252: a suite that prints a product
+    # string containing an emoji dies on the PRINT, and the crash is then
+    # filed as SKIP -- a green run reported for a suite that never ran.
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     proc = subprocess.run([sys.executable, str(suite), str(SRC)],
-                          capture_output=True, text=True, cwd=str(ROOT))
+                          capture_output=True, text=True, cwd=str(ROOT),
+                          encoding="utf-8", errors="replace", env=env)
     out = proc.stdout + proc.stderr
-    m = RESULT_RE.search(out)
+    m = _final_tally(out)
 
     if m:
         got, total = int(m.group(1)), int(m.group(2))
+        # An explicit count in the tally wins; without one, each SKIP
+        # note the suite printed counts as at least one check not run.
+        # A suite cannot skip silently by omission either way.
+        declared = int(m.group(3) or 0)
+        skipped_checks += declared or sum(
+            1 for l in out.splitlines() if l.startswith("SKIP - "))
         passed += got
         failed += total - got
         status = "ok" if got == total else "FAIL"
@@ -109,22 +162,43 @@ for suite in suites:
             failing.append(name)
     elif proc.returncode != 0:
         # Ran, but never printed a tally -- an import error, a missing optional
-        # dependency, a crash. Surfaced as SKIP with the reason, never hidden.
+        # dependency, a crash. Surfaced with the reason, never hidden.
         reason = next((l.strip() for l in reversed(out.splitlines()) if l.strip()), "no output")
-        skipped += 1
-        line = f"{name:<34}{'':>9} SKIP  {reason[:60]}"
+        if reason.split(":")[0] in BROKEN_SUITE_ERRORS:
+            # Our own file does not parse. That is not a property of this
+            # machine and must not be excusable by it.
+            failed += 1
+            failing.append(name)
+            line = f"{name:<34}{'':>9} BROKEN  {reason[:58]}"
+        else:
+            skipped += 1
+            line = f"{name:<34}{'':>9} SKIP  {reason[:60]}"
     else:
         skipped += 1
         line = f"{name:<34}{'':>9} SKIP  produced no tally"
 
     if not QUIET:
         print(line)
+        # Echo the suite's own skip notes. The count alone tells you a
+        # run proved less than it looks like; only the reason tells you
+        # whether that is acceptable.
+        for note in out.splitlines():
+            if note.startswith("SKIP - "):
+                print(f"    {note}")
+        # And, when a suite fails, WHICH check failed. Without this a
+        # CI log says "5/6 FAIL" and nothing else, and the failure has
+        # to be reproduced locally to find out what it was.
+        if m and got != total:
+            for line in out.splitlines():
+                if line.startswith("FAIL - "):
+                    print(f"    {line}")
 
 elapsed = time.monotonic() - started
 print("-" * 62)
 print(f"{'TOTAL':<34}{passed:>4}/{passed + failed:<4} "
       f"in {elapsed:.1f}s across {len(suites)} suite(s)"
-      + (f", {skipped} skipped" if skipped else ""))
+      + (f", {skipped} suite(s) skipped" if skipped else "")
+      + (f", {skipped_checks} check(s) skipped" if skipped_checks else ""))
 
 if failing:
     print("\nFAILING SUITES:")
@@ -136,4 +210,8 @@ if failed:
 if index_dupes:
     print("\nDUPLICATE TOP-LEVEL NAME -- the later definition silently "
           "replaces the earlier one. See the symbol index above.")
+    sys.exit(1)
+if index_unguarded:
+    print("\nA SHIPPED BUG LOST ITS GUARD -- see the error index above. "
+          "Restore the test or write a new one before releasing.")
     sys.exit(1)

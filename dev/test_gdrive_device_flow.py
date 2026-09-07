@@ -42,6 +42,9 @@ scratch = Path(tempfile.mkdtemp(prefix="isla_gdrive_"))
 # assertion still cleans up.
 atexit.register(_shutil.rmtree, str(scratch), ignore_errors=True)
 os.environ["HOME"] = str(scratch)
+# Path.home() ignores HOME on Windows -- USERPROFILE is what it reads,
+# so a suite setting only HOME silently tests the real home there.
+os.environ["USERPROFILE"] = str(scratch)
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "t")
 os.environ.setdefault("ALLOWED_USER_IDS", "111")
 os.environ["ALLOWED_GROUP_IDS"] = ""
@@ -70,7 +73,7 @@ if os.name != "nt":
 else:
     print("SKIP - POSIX file modes are not meaningful on Windows")
 
-mod.GDRIVE_CLIENT_FILE.write_text("{ not json")
+mod.GDRIVE_CLIENT_FILE.write_text("{ not json", encoding="utf-8")
 check("a corrupt client file degrades to 'not set up' instead of raising",
       mod.read_gdrive_client() == {})
 mod.write_gdrive_client("123.apps.googleusercontent.com", "secret")

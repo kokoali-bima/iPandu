@@ -72,21 +72,62 @@ def proc(stdout="", stderr="", rc=0):
 
 HAVE_KEYGEN = shutil.which("ssh-keygen") is not None
 
+
+def _can_symlink() -> bool:
+    """The active key is a symlink swapped atomically, so every check below it
+    needs symlinks to work. Windows refuses them without Developer Mode, which
+    is a property of the dev laptop, not of the bot -- it ships to Linux."""
+    probe = Path(tempfile.mkdtemp(prefix="isla_symlink_probe_"))
+    atexit.register(_shutil.rmtree, str(probe), ignore_errors=True)
+    try:
+        (probe / "l").symlink_to(probe / "t")
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
+CAN_SYMLINK = _can_symlink()
+# Counted and printed, never silent. Suites that quietly dropped checks are how
+# a red run looked green for three releases; a skip has to cost a visible line.
+skipped_checks = 0
+
+
+def skip_block(n: int, why: str) -> None:
+    global skipped_checks
+    skipped_checks += n
+    print(f"SKIP - {n} check(s): {why}")
+
+
 # --- 1. a fresh deployment gets a live gate, unattended --------------------
 if HAVE_KEYGEN:
     check("before setup the gate is inert, exactly as the incident found it",
           mod._keys_configured() is False)
-    check("ensure_write_mode_keys() reports success", mod.ensure_write_mode_keys() is True)
+    # Key GENERATION works anywhere ssh-keygen does; only the last step --
+    # pointing the active key at the read-only one -- needs a symlink, and that
+    # is the one thing a Windows dev laptop refuses. Gate those three checks
+    # and nothing else: gating the whole block dropped eleven checks that were
+    # perfectly capable of running, which is the failure this suite is about.
+    if CAN_SYMLINK:
+        check("ensure_write_mode_keys() reports success",
+              mod.ensure_write_mode_keys() is True)
+    else:
+        mod.ensure_write_mode_keys()   # keys are still generated; the swap is not
+        skip_block(1, "ensure_write_mode_keys() ends in a symlink swap")
     check("...the read-only key now exists", mod.SSH_RO_KEY.exists())
     check("...the write key now exists", mod.SSH_RW_KEY.exists())
     check("...and the gate is no longer inert (THE fix for 'no button ever')",
           mod._keys_configured() is True)
-    check("the active key starts pointed at the READ-ONLY key (locked default)",
-          Path(os.readlink(mod.SSH_ACTIVE_KEY)).name == mod.SSH_RO_KEY.name
-          if mod.SSH_ACTIVE_KEY.is_symlink() else False)
-    before = mod.SSH_RO_KEY.read_bytes()
-    check("re-running is idempotent and does NOT rotate existing keys",
-          mod.ensure_write_mode_keys() is True and mod.SSH_RO_KEY.read_bytes() == before)
+    if CAN_SYMLINK:
+        check("the active key starts pointed at the READ-ONLY key (locked default)",
+              Path(os.readlink(mod.SSH_ACTIVE_KEY)).name == mod.SSH_RO_KEY.name
+              if mod.SSH_ACTIVE_KEY.is_symlink() else False)
+        before = mod.SSH_RO_KEY.read_bytes()
+        check("re-running is idempotent and does NOT rotate existing keys",
+              mod.ensure_write_mode_keys() is True
+              and mod.SSH_RO_KEY.read_bytes() == before)
+    else:
+        skip_block(2, "the locked default and the idempotence re-run both read "
+                      "the active-key symlink")
 else:
     print("SKIP - ssh-keygen unavailable, key-generation cases skipped")
 
@@ -126,7 +167,11 @@ check("a host the read-only key cannot even read is not called protected",
 # --- 3. the legacy-key migration path -------------------------------------
 if HAVE_KEYGEN:
     legacy = Path(HOME) / ".ssh" / "ismart_agent"
-    legacy.write_text("x")
+    # The bot creates ~/.ssh itself on a real host; here the scratch home
+    # is empty, so the migration fixture has to make the directory it is
+    # pretending already existed.
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("x", encoding="utf-8")
     def only_legacy_works(key, host, user, port, cmd, timeout=30):
         if Path(key).name == "ismart_agent":
             return proc(stdout="ISMART_ADMIN_OK\n")
@@ -358,7 +403,8 @@ else:
     print("SKIP - bash unavailable, generated-script execution cases skipped")
 
 failed = [n for n, ok in results if not ok]
-print(f"\n{len(results) - len(failed)}/{len(results)} passed")
+print(f"\n{len(results) - len(failed)}/{len(results)} passed"
+      + (f", {skipped_checks} skipped" if skipped_checks else ""))
 if failed:
     print("FAILED:", failed)
     sys.exit(1)

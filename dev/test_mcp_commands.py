@@ -31,6 +31,9 @@ scratch = Path(tempfile.mkdtemp(prefix="isla_mcpcmd_"))
 # assertion still cleans up.
 atexit.register(_shutil.rmtree, str(scratch), ignore_errors=True)
 os.environ["HOME"] = str(scratch)
+# Path.home() ignores HOME on Windows -- USERPROFILE is what it reads,
+# so a suite setting only HOME silently tests the real home there.
+os.environ["USERPROFILE"] = str(scratch)
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "t")
 os.environ.setdefault("ALLOWED_USER_IDS", "111")
 os.environ["ALLOWED_GROUP_IDS"] = ""
@@ -70,7 +73,7 @@ check("...with its command and args intact",
       mod.read_mcp_servers()["reports"] == {"command": "python3",
           "args": ["tools/mcp_readonly_fs.py", "/srv/reports"]})
 
-on_disk = json.loads(mod.MCP_CONFIG_FILE.read_text())
+on_disk = json.loads(mod.MCP_CONFIG_FILE.read_text(encoding="utf-8"))
 check("the file on disk is in the EXACT shape --mcp-config expects, so it can "
       "be handed to the CLI unmodified",
       list(on_disk.keys()) == ["mcpServers"] and "reports" in on_disk["mcpServers"])
@@ -90,7 +93,7 @@ check("removing something absent returns False, not a crash",
       mod.remove_mcp_server("never-existed") is False)
 
 # --- 2. a corrupt registry degrades to empty, never takes the bot down ------
-mod.MCP_CONFIG_FILE.write_text("{not json at all")
+mod.MCP_CONFIG_FILE.write_text("{not json at all", encoding="utf-8")
 check("an unreadable registry yields no servers instead of raising",
       mod.read_mcp_servers() == {})
 check("...and the suffix is empty, so the CLI call is built without MCP at all",

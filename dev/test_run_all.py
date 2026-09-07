@@ -156,6 +156,84 @@ check("...and the index actually ran and reported, rather than being skipped "
       "into silence the way it was on Linux",
       "0 duplicate" in out6)
 
+
+# --- 7. a suite that will not PARSE is broken, not skipped ------------------
+# Found the hard way: a bulk edit left an IndentationError in a suite, run_all
+# filed it in the same bucket as "python-telegram-bot is not installed", and
+# the run exited 0. A missing optional dependency is a fact about the machine.
+# A SyntaxError is a fact about our own code and must cost the run.
+BROKEN_SUITE = "x = 1\n  y = 2\n"          # IndentationError on import
+
+root7 = isolated_project(VALID_EMPTY_MODULE,
+                         {"test_fake.py": FAKE_OK,
+                          "test_bad.py": BROKEN_SUITE})
+proc7 = run_all(root7)
+out7 = proc7.stdout + proc7.stderr
+shutil.rmtree(root7, ignore_errors=True)
+check("a suite that cannot be parsed FAILS the run", proc7.returncode != 0)
+check("...and is labelled BROKEN, not SKIP", "BROKEN" in out7)
+check("...and is named, so it can be fixed rather than hunted",
+      "test_bad.py" in out7)
+check("...while the healthy suite beside it still ran", "1/1" in out7)
+
+# A missing dependency must STILL be a skip -- the distinction is the point,
+# and a rule that fails everything would pass the checks above for free.
+IMPORT_SKIP = ("import no_such_module_anywhere  # noqa\n"
+               'print("1/1 passed")\n')
+root8 = isolated_project(VALID_EMPTY_MODULE,
+                         {"test_fake.py": FAKE_OK,
+                          "test_dep.py": IMPORT_SKIP})
+proc8 = run_all(root8)
+out8 = proc8.stdout + proc8.stderr
+shutil.rmtree(root8, ignore_errors=True)
+check("a MISSING DEPENDENCY is still only a skip", "SKIP" in out8)
+check("...and does not fail the run on its own", proc8.returncode == 0)
+
+# --- 8. skips INSIDE a suite are counted, not swallowed ---------------------
+# A suite could drop half its checks on a platform and still print a spotless
+# N/N. The tally now carries them and run_all totals them, so the pre-push
+# threshold can see them.
+PARTIAL = ('print("PASS - one that ran")\n'
+           'print("SKIP - 4 check(s): no symlinks on this OS")\n'
+           'print("1/1 passed, 4 skipped")\n')
+root9 = isolated_project(VALID_EMPTY_MODULE, {"test_partial.py": PARTIAL})
+proc9 = run_all(root9)
+out9 = proc9.stdout + proc9.stderr
+shutil.rmtree(root9, ignore_errors=True)
+check("a suite reporting its own skipped checks is still counted as passing",
+      proc9.returncode == 0 and "1/1" in out9)
+check("...and the skipped checks reach the TOTAL line instead of vanishing",
+      "4 check(s) skipped" in out9)
+
+
+# --- 9. a suite that skips WITHOUT saying so is still counted ---------------
+# Three suites had been doing exactly this since they were written: print a
+# SKIP note, then a spotless tally. Requiring every author to remember the
+# count is the bet that already lost, so the notes themselves are counted.
+SILENT = ('print("PASS - one that ran")\n'
+          'print("SKIP - POSIX file modes are not meaningful here")\n'
+          'print("1/1 passed")\n')
+root10 = isolated_project(VALID_EMPTY_MODULE, {"test_silent.py": SILENT})
+proc10 = run_all(root10)
+out10 = proc10.stdout + proc10.stderr
+shutil.rmtree(root10, ignore_errors=True)
+check("a skip note with no declared count is still counted",
+      "1 check(s) skipped" in out10)
+check("...and the note itself is echoed, so the count can be judged",
+      "POSIX file modes" in out10)
+check("...without the suite being treated as failing", proc10.returncode == 0)
+
+# A declared count must not be added to the notes as well.
+BOTH = ('print("PASS - one that ran")\n'
+        'print("SKIP - 5 check(s): a whole block")\n'
+        'print("1/1 passed, 5 skipped")\n')
+root11 = isolated_project(VALID_EMPTY_MODULE, {"test_both.py": BOTH})
+proc11 = run_all(root11)
+out11 = proc11.stdout + proc11.stderr
+shutil.rmtree(root11, ignore_errors=True)
+check("a declared count wins over the note count, never both",
+      "5 check(s) skipped" in out11 and "6 check(s) skipped" not in out11)
+
 failed = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed")
 if failed:

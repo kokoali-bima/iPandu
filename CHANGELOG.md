@@ -687,6 +687,639 @@ this is a systemd path, and this dev box is not Linux, so "two deployments no
 longer restart each other" rests on source inspection plus a functional check
 of the path each one resolves, not on a real host.
 
+## v0.2b.88 -- a flaky link to Telegram no longer aborts PIN entry
+
+Found on the bscloud agent, which has a slow path to Telegram. The operator was
+registering the Bima Kota Proxmox (103.152.36.66) through the chat auto-add flow
+-- type a request naming a host, the bot offers to register it, PIN confirms it.
+It kept failing, and the natural suspicion was the SSH key. The key was never
+the problem: `agent_write` already authenticated to that Proxmox
+(`SRV-M10-KOBI01`, pve-manager 9.2.11). The flow never got as far as the key.
+
+Every digit on the PIN keypad calls `query.answer()` -- the cosmetic ack that
+stops the little spinner on the tapped button, which Telegram clears on its own
+after a few seconds regardless. One of those calls hit a transient
+`httpx.ReadTimeout`, it raised `telegram.error.TimedOut`, and that aborted
+`cmd_pin_key` mid-handler. The PIN never completed, so the registration it was
+confirming never ran. The whole thing turned on a spinner acknowledgment that,
+on a good link, nobody would ever notice.
+
+`_safe_answer()` now wraps the ack: it swallows `TimedOut`, `NetworkError` and
+`BadRequest` (the last covers "query is too old", equally nothing to do about),
+and re-raises anything else so a real bug still surfaces. All 31 `answer()`
+call sites route through it. A flaky link can still drop an ack, but it can no
+longer take the handler down with it -- the digit registers, the keypad
+redraws, the confirmation completes.
+
+The reproduction is the test that matters: `cmd_pin_key` driven with a query
+whose `answer()` always times out, asserting the digit still lands in the
+session and the handler does not raise.
+
+For the operator: nothing about the Bima Kota Proxmox needs changing. Once this
+is deployed, re-run the add through chat and complete the PIN -- and since the
+key already works there, choose "use the existing key" rather than a password.
+
+Registered as E020. **1,014 checks across 46 suites.**
+
+## v0.2b.87 -- /addserver lost a host it had already reached, and said nothing
+
+A real one, on the itbutler cluster. The operator ran the add-server wizard for
+10.10.59.75, an NFS host. The agent connected, placed its key, verified it, and
+showed the "Key installed and verified" card. Then they tapped the last button
+and got "That form expired". The host never made it into /servers, and 18,128
+lines of journal did not mention it once.
+
+Two independent faults, and the fix for each is small.
+
+**The wizard lived only in memory, with a fifteen-minute TTL, and the service
+restarted underneath it.** The restart was the v0.2b.86 /update -- the operator
+was mid-wizard when the bot updated itself. `/unlock` has persisted its state
+across restarts for exactly this reason since it was written; the server wizard
+never did. It does now: written to `server_wizard.json` after every step and
+reloaded at startup, dropping any that expired while the process was down. The
+step that matters most -- "key installed, waiting for the final tap" -- is now
+exactly the state that survives.
+
+The password is deliberately NOT part of what gets persisted. It is a local
+variable in the input handler, deleted the instant `bootstrap_key_with_password`
+returns, and it was never written into wizard state to begin with -- so the new
+file on disk carries host, user and port (the same fields `servers.json` already
+stores in clear) and nothing secret. It is chmod 600 and gitignored regardless,
+and a test drives a realistic wizard through the file and asserts nothing
+password-shaped appears in it.
+
+**`bootstrap_key_with_password` had no logging at all.** Placing a credential on
+a machine is the single most consequential thing the wizard does, and it left no
+trace unless ssh itself errored. Diagnosing this incident meant reading
+`~/.ssh/known_hosts` by hand for a timestamp to prove the connection had even
+happened. Five log points now: placing the key, a refused password, an ssh
+failure, a key that writes but will not authenticate, and a verified success.
+None of them logs the password.
+
+That fourth case is worth naming, because 10.10.59.75 is still not added: the
+key was appended to `authorized_keys` and then did not authenticate. On an
+appliance that does not persist `/root/.ssh` -- which an NFS box may well be --
+the append succeeds against an overlay that is wiped, or root key-login is off.
+The log now says "key written but does not authenticate yet" instead of a silent
+success followed by a mystery. Whether .75 can take a key at all is a question
+about that box, and the next step there is to confirm what it is.
+
+Registered as E018 and E019. **1,002 checks across 45 suites.**
+
+## v0.2b.86 -- the release gate had two holes, and one of them ran the repo
+
+v0.2b.85 shipped correctly and turned CI red on all four Python versions. The
+release notes for it were about green figures that had not been earned, which
+made this an uncomfortable but useful thing to find within the hour.
+
+Nothing was wrong with the release. `git push origin master` fired the workflow,
+and `git push origin v0.2b.85` followed a few seconds later. CI checks out the
+commit and reads `git describe`, which cannot see a tag still sitting on the
+developer's machine -- so `test_release_consistency` reported "notes committed,
+tag missing", which is precisely the v0.2b.71 defect it was written to catch.
+Pushing the tag did not trigger a new run, so the red stayed. A re-run, with
+nothing changed, went green.
+
+The wrong lesson is "remember to push them together". git already hands pre-push
+the refs being pushed, on stdin, so the hook can simply look: if the committed
+CHANGELOG announces a version whose tag exists here but is neither on the remote
+nor in this push, it refuses and prints the command that does it properly.
+Verified in both directions against the real hook file, in a scratch repository
+with a scratch origin -- including the three cases that must still pass, because
+a rule that refused everything would satisfy the first check for free.
+
+### And the hole underneath it
+
+Chasing that turned up something larger. **This repository has 86 tags across
+123 commits and has never had a single pull request**, and I had been reading
+that as a habit worth changing. It was not a habit. It was enforced.
+
+`test_release_consistency` required `git describe` to equal the declared version
+*exactly*. That is true only AT the tagged commit. One commit later it reads
+`v0.2b.85-1-gabc123` and the suite goes red -- so every commit had to be a
+release, and a branch carrying unreleased work could never be green. Branch
+protection and a PR-based flow were never going to happen while the test suite
+refused to pass on an unreleased commit.
+
+Exactness is now required only when HEAD *is* the tagged commit. Past it, the
+check becomes "unreleased work sits on top of the declared version", which still
+catches a wrong or missing tag. The check that actually guards v0.2b.71 --
+release notes committed with no tag -- is separate and untouched.
+
+### Smaller, from the same hour
+
+`run_all` printed `5/6 FAIL` and nothing else when a suite failed, so the CI log
+said a check had failed without saying which, and diagnosing it needed a local
+reproduction the log should have made unnecessary. It already echoed SKIP notes;
+it now echoes the FAIL lines too.
+
+Registered as E016 and E017. **981 checks across 44 suites.**
+
+## v0.2b.85 -- a release that compiles is not a release that starts
+
+`apply_update()` has refused a build that does not compile since early on, and
+that guard has always been narrower than it sounds. `py_compile` proves the file
+parses. It says nothing about whether the thing will run.
+
+A release can compile perfectly and still die on the way up: a `NameError` at
+module level, a handler registered against a function that was renamed, a
+constant read from a config key that no longer exists. The process then dies
+before a single line inside the bot executes, systemd restarts it five seconds
+later, and it dies again -- forever, because nothing is left running that could
+undo it. The operator finds out from silence in Telegram, and the machine that
+could fix it is the machine that is down.
+
+**The guard for that cannot live in `lite_agent.py`, because the failure it
+catches is one where `lite_agent.py` never loads.** So `tools/boot_guard.py`
+runs as `ExecStartPre`, before the interpreter touches the bot at all, and it is
+built from nothing but the standard library -- a guard that needs the venv to be
+intact is no use on the day the venv is not.
+
+    apply_update()      arms it: records the commit to come back to
+    boot_guard.py       counts each start; after three, resets the checkout
+    post_init           disarms it -- reaching there means the build really started
+
+Three attempts, with `RestartSec=5`, is about fifteen seconds of silence before
+the checkout goes back. Two would trip over a single unrelated restart racing
+the first boot; five is most of a minute during which you are already wondering
+what happened.
+
+Two properties matter more than the feature itself, and both are the ones a
+careless version gets wrong:
+
+* **It always exits 0.** An `ExecStartPre` that fails stops the service from
+  starting at all, which would turn a guard against downtime into a cause of
+  one. The unit also prefixes it with `-`, so systemd ignores a non-zero exit
+  even if the script somehow manages one. Two locks on the same door.
+* **It disarms the moment it acts.** A guard that can roll back twice can roll
+  back forever.
+
+The rollback is reported in Telegram through `update_announce.json` -- the file
+the bot already reads on startup to confirm an update -- rather than a second
+delivery path written today and exercised never. The message names the version
+that failed, and says explicitly that settings, briefs, sessions and the PIN
+were not touched, because that is the first fear on seeing it.
+
+Verified against a real git repository with two commits rather than a mocked
+one: the whole value of this is that `git reset --hard` moves `HEAD` when asked,
+and a mock would only prove we called a function.
+
+**This update does not protect itself.** The old code running `apply_update()`
+does not yet know how to arm the guard. Full protection starts from the next
+update.
+
+### The test suite was reporting numbers it had not earned
+
+Running the suite on Windows for the first time: **32 of 41 suites SKIPped, and
+it printed `97/97` and exited 0.** The same shape as the CI failure in v0.2b.84 --
+a figure that looks like assurance and is not.
+
+Underneath were three real defects in the harness:
+
+* **Every suite redirects `HOME` to a scratch directory so a test never touches
+  the machine it runs on. `Path.home()` does not read `HOME` on Windows -- it
+  reads `USERPROFILE`.** So 28 suites had been running against the operator's
+  real home directory. Found the honest way, not by reasoning: `~/.ssh/` held
+  `agent_readonly` and `agent_write`, generated by a test run days earlier.
+* **`read_text()` with no encoding is cp1252 on Windows.** The product writes
+  UTF-8, so a suite reading back its own fixture crashed on a byte it had just
+  written -- and `run_all` filed the crash as a skip. Twenty-five calls are now
+  pinned, and `test_suite_hygiene.py` refuses a bare one.
+* A fixture in `test_node_guard.py` wrote to `~/.ssh/` without creating it.
+
+### And `run_all` was excusing two things it should not
+
+* **A suite that will not parse was reported as SKIP** -- the same bucket as
+  "python-telegram-bot is not installed" -- so a broken test cost nothing. A
+  missing optional dependency is a fact about the machine; a `SyntaxError` is a
+  fact about our own code. Those now say `BROKEN` and fail the run, while a
+  missing dependency is still only a skip. Both directions are guarded, because
+  a rule that failed everything would pass the first check for free.
+* **Skips *inside* a suite were invisible.** A suite could drop half its checks
+  on a platform and still print a spotless `N/N`. They are counted now, and
+  echoing them immediately turned up three suites that had been skipping
+  silently since they were written. The count does not depend on a suite author
+  remembering to declare it -- the skip notes themselves are counted.
+
+`.githooks/pre-push` runs the whole suite before anything leaves the machine and
+refuses on red, on more than two skipped suites, and on more than eight skipped
+checks. Enable it per clone with `git config core.hooksPath .githooks`; bypass a
+single push with `--no-verify`.
+
+Registered as E013, E014 and E015. **973 checks across 43 suites**, from 931
+across 41, and the Windows run is now a real one rather than a polite fiction.
+
+## v0.2b.84 -- CI had been red for three releases and nobody looked
+
+Every release note here has ended with a green figure. Those runs were real, but
+they were **one machine on one Python version**. GitHub Actions runs 3.10, 3.11,
+3.12 and 3.13, and it had been failing since v0.2b.81. Nothing checked it,
+including the person reporting the numbers.
+
+Two separate faults, both in the tests rather than the product, and both worse
+than they look.
+
+**`test_py_compat.py` was SKIPped on 3.10 and 3.11 -- the only two versions it
+exists to protect.** It guards against a backslash inside an f-string
+expression, which is a `SyntaxError` before Python 3.12. To prove its detector
+works it parses a deliberately bad snippet; on 3.10 and 3.11 `ast.parse` refuses
+that snippet outright, the suite crashed, and `run_all` reported it as a skip.
+So the check was silently absent exactly where the bug bites, and present only
+where it cannot happen.
+
+A refusal from the interpreter is the same finding as a hit from the AST walk,
+so it now counts as one. And because that branch only fires below 3.12, there is
+a case that reaches it on every version -- source no Python can parse -- since an
+unexercised branch is how this got missed in the first place.
+
+**`test_release_consistency.py` failed on all four versions.** `actions/checkout`
+defaults to a depth-1 clone with no tags, and that suite asks git whether the
+release it is looking at has one. It reported "release notes committed with no
+tag" on every push. The workflow now checks out with `fetch-depth: 0`, so CI
+verifies the real thing instead of failing on its own checkout.
+
+The lesson is the one this project keeps relearning: a gate that is red for a
+reason unrelated to the code is a gate people stop reading. It had been red long
+enough to stop being information.
+
+931/931 across 41 suites locally; CI is the number that now has to agree.
+
+## v0.2b.83 -- "it must be bilingual" stops depending on anyone remembering
+
+The operator has had to say this more than once. That is the signal that it
+should be a gate, not a habit.
+
+`audit_lang.py` already existed and reads well, but it proves nothing: it flags
+38 call sites, most of them false positives where the text was built from `_t()`
+a few lines earlier. Useful for reading, useless for stopping a release.
+
+`dev/test_bilingual.py` does two things instead:
+
+- **Pins the 27 messages added across v0.2b.78-82** by fragment, so this run's
+  work cannot quietly lose a half later.
+- **Walks every `_t()` call structurally** -- all **446** of them -- and fails if
+  any carries fewer than two halves, or an empty one. A message added in English
+  only fails on the day it is written, not when someone running `/lang id` finds
+  it months later.
+
+Proven in both directions rather than asserted: on a copy with one deliberately
+English-only message inserted, the gate named the exact line and failed the run.
+
+One detail worth recording, because it caused three false alarms in a single
+day: fragment matching has to join adjacent string literals first. Python
+concatenates `"a " "b"` into `"a b"`; a substring search does not. Three of these
+messages first reported MISSING while being present and correct -- exactly as two
+assertions elsewhere did the same afternoon. The check normalises the source
+before matching now.
+
+929/929 across 41 suites.
+
+## v0.2b.82 -- how to close off password logins, without doing it for you
+
+Turning off password authentication is the one change in this whole area that
+locks you out permanently when it goes wrong. So the bot does not do it. It
+hands over the exact commands, once the host is registered and its own key is
+proven -- and only when that host actually still accepts passwords.
+
+Checked by asking **sshd itself** (`sshd -T`), not by reading the config file,
+because on these machines the file lies. Every Ubuntu and Proxmox host in this
+fleet has `Include /etc/ssh/sshd_config.d/*.conf` near the top of
+`/etc/ssh/sshd_config`, and the drop-in is what decides. One host here has
+`#PasswordAuthentication yes` commented out in the main file while
+`60-cloudimg-settings.conf` sets it to `no`. Reading the main file would have
+reported the opposite of the truth. Measured across the fleet: one Proxmox node
+still open, another already closed -- so blanket advice would have been wrong
+half the time.
+
+The advice is a **drop-in**, not the `sed -i` recipe that circulates for this:
+
+    printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' \
+      > /etc/ssh/sshd_config.d/00-ismart-hardening.conf
+    sshd -t && systemctl reload ssh || systemctl reload sshd
+    sshd -T | grep -i passwordauth
+
+The `00-` prefix is not decoration. sshd takes the **first** value it reads, and
+the Include sits above everything else -- verified in both directions on a
+throwaway config: with `00=no, 99=yes` the effective value was `no`, and with
+the two swapped it was `yes`. A drop-in that sorts after the cloud-image file
+would be silently ignored, and so would editing the main file. That is precisely
+how someone ends up believing a host is hardened when it is not.
+
+The rest of the wording earns its place too: `sshd -t` before reloading so a
+typo cannot lock anyone out, `reload` rather than `restart` so live sessions
+survive, `sshd -T` afterwards so the operator verifies instead of trusting, and
+a note to keep the current session open until that line prints `no` -- it is the
+way back if anything is wrong.
+
+926/926 across 40 suites.
+
+## v0.2b.81 -- the bot can put its own key on a new machine
+
+The last manual step in `/addserver` was the one people put off: leave Telegram,
+find another way onto the machine, paste a command, come back. For a VM inside a
+hypervisor that meant finding console access first.
+
+`install_node_guard()` already did everything else -- guard script, read-only key
+behind it, write key -- but it needs a key that already works. On a brand new
+host there is none. That gap is now closed with one password, used once, to
+place the write key. Everything after it is the existing path, unchanged.
+
+**Nothing new was installed for it.** `ssh` reads a password from `SSH_ASKPASS`
+when no terminal is attached, under `setsid` with `SSH_ASKPASS_REQUIRE=force`.
+Verified on this fleet against a host that offers password auth, using a
+username that does not exist so no real account could be locked out. paramiko
+would have worked too, at seven packages in a project that has one.
+
+**The password never reaches disk.** The obvious askpass helper echoes the
+secret, which writes it to a file -- exactly what this exists to avoid. Ours
+reads an environment variable, so the file holds a variable name and nothing
+else. It is not on the command line either, where `ps` would show it.
+
+**Where the bot cannot clean up, it will not ask.** Telegram lets a bot delete
+incoming messages in a private chat; in a group that needs the
+`can_delete_messages` admin right specifically. `bot_can_delete_here()` is
+checked *before* the password is invited, and the refusal names that one right
+and says the member permissions are not needed.
+
+The order matters more than it looks: the message is deleted **first**, before
+anything that can fail. Everything after can go wrong; the message sitting in
+the chat is the one thing that must not survive a failure.
+
+**Exit 0 is not accepted as success.** The key is proven by using it --
+`test_server_ssh` with the key and the password out of the picture entirely. A
+remote command that returned 0 without the key landing would otherwise register
+a host the agent cannot reach.
+
+Afterwards the operator is told, plainly, to change that password: it travelled
+through Telegram to get here. The bot never stored it, and drops it the moment
+the call returns.
+
+Still deliberately not done: reconfiguring `sshd` to refuse password logins.
+That one locks you out permanently if it is wrong, so it waits.
+
+916/916 across 40 suites.
+
+## v0.2b.80 -- paramiko was not needed, and the group case is handled
+
+Two questions settled by measuring rather than reasoning.
+
+**No new dependency.** The plan was to add `paramiko` so the bot could log in
+with a password once and install its keys. Installed into a throwaway venv it
+brings **seven packages** -- bcrypt, cryptography, invoke, pynacl and their own
+deps -- into a project that has exactly one. Before accepting that, the tool
+already on every host was tested: `ssh` itself, fed a password through
+`SSH_ASKPASS` with `SSH_ASKPASS_REQUIRE=force` under `setsid`.
+
+It works. Proven against a host that offers password auth, using a username
+that does not exist so no real account could be locked out: the askpass helper
+was invoked, which is the only thing in question -- whether a password can reach
+ssh with no terminal attached. OpenSSH 9.6 on the agent hosts, and
+`SSH_ASKPASS_REQUIRE` needs 8.4 or newer.
+
+And the password need never touch disk. The obvious helper script echoes the
+secret, which writes it to a file -- exactly what the feature exists to avoid.
+Instead the helper reads an environment variable, so the file on disk contains a
+variable name and nothing else. Verified: the value reaches the helper.
+
+**The bot now checks whether it can clean up, before inviting a credential.**
+Telegram grants bots deletion of *incoming* messages in private chats
+specifically; in a group that takes the `can_delete_messages` administrator
+right, which is separate from adding or removing members. `bot_can_delete_here()`
+answers that per chat, and it is asked **before** the paste, because finding out
+the bot cannot delete once the password is already on screen is finding out too
+late.
+
+When it cannot, the warning says exactly what to grant and what not to:
+
+> To let me clean these up here, make me an admin with **Delete messages**
+> only; I do not need to add or remove members.
+
+Anything other than an explicit `True` counts as no -- a plain member, an admin
+without that right, and a membership lookup that fails all fall the same way.
+
+**A test that was lying, twice.** Two assertions passed for the wrong reasons
+and then failed for the wrong reasons: one matched a phrase the source wraps
+across two lines, the other searched for `await msg.delete()` from the start of
+the file and found an unrelated wizard's call several hundred lines earlier. Both
+now anchor to the block they are actually about.
+
+895/895 across 39 suites.
+
+## v0.2b.79 -- a password typed into the chat is caught in code, not by a model
+
+Handing over credentials is the natural thing to do when a machine needs them.
+It is also the one thing that cannot be taken back: a password typed here sits
+in this chat's history, on both devices, and on Telegram's servers, and deleting
+the message does not undo that it was sent.
+
+So the bot now notices, **before the model gets the turn**:
+
+    ⚠️ That looked like a password. I deleted your message.
+       [...] Treat it as exposed and change it.
+       You never need to send me one. When a machine needs credentials I ask
+       for them in a wizard, on a keypad, where nothing becomes a chat message.
+
+Deliberately in code rather than in a brief. It costs **zero tokens**, it runs
+on every message, and unlike an instruction to a model it cannot be talked out
+of firing. The message is deleted where the bot is allowed to; where it is not,
+the warning says so plainly instead of implying it is gone.
+
+**The text is scrubbed before it goes anywhere else.** That matters more than
+the warning: the message is kept for the "just answer" button, and forwarding a
+credential to a model while deleting it from the chat would look solved and not
+be. Only the secret is replaced -- the host, port and user survive, so the
+registration offer still works.
+
+Narrow on purpose. `password expiry policy`, `gimana cara reset password?` and
+`password manager mana yang bagus` are questions, not disclosures, and a warning
+that interrupts conversations is one people learn to dismiss. The pattern needs
+a keyword, a word boundary, and something actually assigned after it.
+
+**A miscount in the runner, found by not trusting the number.** Sixteen new
+tests were added and the total did not move: `run_all` read the FIRST
+`N/M passed` line, and the suite had grown a second summary block. It now takes
+the last tally -- and had a check above that first block failed, its
+`sys.exit(1)` would have stopped the file before the later tests ran at all.
+
+**A merge-conflict guard**, after committing `CHANGELOG.md` with `<<<<<<<`
+markers still in it in the iPandu fork: the resolution script died on an
+encoding error and the `git add -A && git commit` behind it ran anyway. Nothing
+caught it, because the version check still parsed.
+
+885/885 across 39 suites.
+
+## v0.2b.78 -- the bot notices a machine it has never heard of
+
+Asking the agent to fix something on an unregistered host used to go one of two
+ways depending on which model answered. v0.2b.77 told the models about the write
+gate; this removes the need for them to get it right at all.
+
+When a message carries an IPv4 the inventory has never seen, the bot now says so
+**before the model gets the turn** and offers the deterministic path:
+
+    🆕 192.0.2.10 — port 222, user root is not in the inventory yet.
+       I have no key there, so I cannot reach it. Register it now?
+       [ Register it ] [ Just answer ] [ Cancel ]
+
+Registering goes through the PIN and opens `/addserver` **already filled in**
+with the host, port and user the operator typed in plain language -- re-asking
+for details that were in the first message was most of what made this feel
+heavy. The wizard then asks what it always asked: hypervisor / single VM /
+other, and for a hypervisor, Proxmox or another.
+
+"Just answer" runs the question with no PIN, on purpose: that path grants
+nothing. The agent stays read-only, and if it turns out something must change it
+emits `NEEDS_WRITE:` and the PIN appears then -- the existing gate, rather than a
+second prompt that teaches people to tap through.
+
+Deliberately narrow. Only IPv4 literals: hostnames would fire on every domain
+mentioned in conversation, and a card that cries wolf is a card people dismiss
+without reading. Cluster members already in `cluster_hosts` are not "new", and
+loopback and `0.0.0.0` are ignored -- they appear in log excerpts constantly.
+Only owners and group admins see it, since nobody else could register anything.
+
+The turn is not spent. The model has no key for that machine, so the turn was
+always going to end in a guard refusal -- and on this deployment a turn is a
+median 29 seconds and real tokens.
+
+869/869 across 39 suites.
+
+## v0.2b.77 -- the brief never mentioned the write gate
+
+Registering a Proxmox went smoothly on Gemini and badly on Sonnet. That reads
+like a model problem. The logs say otherwise.
+
+Across 36 hours on that host there were **two** write-mode mentions, one of them
+the Gemini unlock that worked. Sonnet never emitted `NEEDS_WRITE:` at all. It
+ran into `pve-ro-guard: refused`, treated it as a fault to route around, and
+spent ten turns doing that. There were **zero application errors** in the same
+window -- the six logged were `telegram.error.NetworkError: Bad Gateway`, a
+14-second Telegram outage the bot rode through, with no line touching
+`lite_agent.py`.
+
+`CAPABILITIES_BRIEF` -- added in v0.2b.73 so capabilities ship with the code
+rather than with the install -- covered media and Drive markers and said
+**nothing** about the write gate. Not `NEEDS_WRITE`, not the guard, not
+`/addserver`. Sonnet was not being difficult; it had not been told.
+
+It now covers both:
+
+- **Asking for write access.** The read-only key and the guard on the far side
+  are normal, not a fault. Do not retry, do not hunt for a command that slips
+  past, do not tell the operator their key is broken -- emit
+  `NEEDS_WRITE: <what>` and let the PIN prompt do its job.
+- **Adding a server.** Do not improvise a registration: no editing
+  `~/.ssh/config`, no appending to `authorized_keys`, no asking for a password.
+  Tell the operator to run `/addserver`. The wizard is deterministic and
+  **never involves the model at all** -- it runs before the model is called --
+  so anything assembled by hand instead is strictly worse.
+
+The brief grows from ~445 to ~709 tokens, paid once per conversation. That is
+the cost of removing model variance from the most consequential operation this
+bot performs.
+
+844/844 across 38 suites.
+
+## v0.2b.76 -- the whole class, not the three that fired
+
+v0.2b.75 fixed three crashes that shared one shape: code reached for
+`update.message`, and the update was a button callback or an edited message,
+where it is None. Fixing the three that happened to fire is not fixing the
+class, so this walks the call graph instead.
+
+From every entry point where `update.message` is not guaranteed -- all fifteen
+button and keypad handlers, the unlock-and-resume flow, the turn runner, and
+`handle_message` (which admits edited messages **on purpose**, via
+`allow_edited=True`) -- 159 functions are reachable. Six of them still touched
+`update.message` directly:
+
+    _run_turn_inner              the "recorded to knowledge" note, and
+                                 THE failure notice itself -- which is why the
+                                 logs said "even the failure notice couldn't be
+                                 delivered"
+    _handle_wizard_input         reads update.message.text
+    _handle_server_input         reads update.message.text
+    _handle_gdrive_wizard_input  reads update.message.text
+    _gdrive_begin_device         replies
+    _gdrive_begin_rclone         replies
+
+The three wizards are the sharper find: `handle_message` reads
+`effective_message` and lets edited messages through, then hands them to
+wizards that read `update.message.text`. Editing a message while an OAuth code
+or a server address was pending would have crashed. Fifty lines now go through
+`_msg()`.
+
+**`dev/test_reply_target.py`** makes it permanent: it re-walks that call graph
+on every run and fails if anything reachable from an unguarded entry point
+touches `update.message` directly. The next function to get this wrong fails in
+the suite rather than in a chat.
+
+839/839 across 38 suites.
+
+## v0.2b.75 -- the write window stops fighting the work it authorised
+
+A night of real failures, all reported by the operator, all reproduced.
+
+**`/addserver` could not add anything, and it was our own guard doing it.**
+The Kota Bima Proxmox refused every attempt with `pve-ro-guard: refused -- this
+key is read-only`, though the key was installed correctly. The probe was
+`echo ISMART_OK && uname -sr`, and pve-ro-guard denies any `&`, `;`, backtick
+or redirect outright, before it looks at which verbs were used. So the sentinel
+that existed to prove the command ran was the exact reason it could not run.
+Reproduced on both hosts; the one server that ever registered got in before the
+guard was installed on it. The probe is now a bare `uname -sr`, verified
+against both hosts.
+
+**The PIN was asked for twice, and then the turn died.** From the logs:
+
+    23:06:50  WRITE MODE OPENED for 10 minute(s)   -> expires 23:16:50
+    23:06:51  running agy
+    23:21:26  running agy (failover, same turn)
+    23:25:01  AttributeError: 'NoneType' has no attribute 'reply_text'
+
+The window was ten minutes; the turn took eighteen, because agy failed over
+mid-turn and the second model started from scratch. The end-of-turn check saw a
+closed window and re-offered the unlock -- and `offer_unlock` reached for
+`update.message`, which is always None inside a button callback, so the whole
+turn died after the work was done. Fourteen unlocks in one day.
+
+Three changes. The default window is **30 minutes** and the ceiling **6 hours**.
+The end-of-turn re-offer is suppressed when the window was open at turn start,
+with a one-line note instead of a fresh PIN keypad. And `offer_unlock` replies
+through `_msg()`.
+
+**A second `/unlock` no longer opens a second keypad.** It reports the time
+left and offers an extend button that needs **no PIN** -- the PIN authorised a
+session, not a stopwatch, and infrastructure work runs for hours. What keeps it
+bounded is that the ceiling is measured from the ORIGINAL unlock, so extensions
+cannot chain past it; when the session has spent its ceiling, a fresh PIN is
+required.
+
+**Deliveries failed with nowhere to reply.** At 10:03 and 10:05, twice each,
+then "even the failure notice couldn't be delivered". `_msg()` handled typed
+messages and button callbacks but not EDITED ones, where both are None --
+though `_authorized()` lets edited messages through on purpose. It now falls
+back to `update.effective_message`.
+
+**A long turn no longer looks like a dead bot.** Measured across 178 real
+turns: median 29s, p75 84s, p90 284s, longest 6841s (1h54m); 76% finish inside
+a minute. So one "still working" line appears after 90 seconds and is **edited
+in place** every 3 minutes -- at that cadence the 1h54m turn would otherwise
+have sent 38 separate messages. When the write window is nearly up it carries
+the extend button.
+
+**Drive quota errors read like Drive is broken.** rclone's shared client_id ran
+out of Google's project-wide query quota and returned
+`403 Quota exceeded for quota metric 'Queries'`, which was pasted at the
+operator verbatim. Nothing was wrong with the account, file or config -- the
+same remote listed fine five hours later. It now says so.
+
+**New: `dev/error_index.py` and `ERRORS.md`.** Every failure this project has
+shipped, what caused it, and the test that guards it -- and the run FAILS when
+an entry points at a test that no longer exists, because a regression quietly
+losing its guard is how the same bug ships twice.
+
+832/832 across 37 suites.
 
 ## v0.2b.74 -- the expensive-conversation warning stops going quiet
 
