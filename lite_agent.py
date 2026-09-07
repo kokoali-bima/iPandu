@@ -1459,6 +1459,16 @@ def mentions_password(text: str) -> Optional[str]:
     # heading in a pasted form. Either way there is nothing to leak yet.
     if secret.startswith(("http://", "https://")):
         return None
+    # A plain lowercase word right after "password" is usually naming WHAT
+    # the password belongs to, not disclosing it: "gimana cara reset password
+    # proxmox?", "apa password default OPNsense" and "ganti password mysql"
+    # all matched here and swallowed an ordinary question -- the handler
+    # `return`s on a hit, so the question went unanswered, not just unlogged.
+    # A real credential has some shape to it (a digit, a symbol, a capital
+    # letter) that "proxmox" and "mysql" do not, so require that shape rather
+    # than trusting any word-shaped token after the keyword.
+    if secret.isalpha() and secret.islower():
+        return None
     return secret
 
 
@@ -10213,6 +10223,15 @@ async def cmd_providers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 _pending_newhost: dict[int, dict] = {}      # chat_id -> {"host", "hints", "text"}
 
+# Hosts a room has already said no to registering, so the card stops coming
+# back. Without this, a firewall or VPN gateway that is never going to be an
+# SSH-reachable server -- 172.16.10.20, a physical OPNsense box; 8.8.8.8,
+# quoted out of a log -- reblocks every single message that mentions it: the
+# call site returns before the model ever runs. In-memory and per-chat, like
+# _pending_newhost beside it; a restart clears it and the room just declines
+# again once.
+_dismissed_hosts: dict[int, set[str]] = {}  # chat_id -> {host, ...}
+
 
 async def offer_register_host(update: Update, context: ContextTypes.DEFAULT_TYPE,
                               host: str, hints: dict, text: str) -> None:
@@ -10263,6 +10282,8 @@ async def cmd_newhost_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     action = query.data.split(":", 1)[1]
 
     if action == "cancel" or not pending:
+        if pending:
+            _dismissed_hosts.setdefault(chat_id, set()).add(pending["host"])
         _pending_newhost.pop(chat_id, None)
         await query.edit_message_text(_t(lang, "✖️ Dropped.", "✖️ Dibatalkan."))
         return
@@ -10273,6 +10294,12 @@ async def cmd_newhost_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # must change something it emits NEEDS_WRITE and the PIN appears then --
         # the existing, tested gate, rather than a second prompt that teaches
         # people to tap through.
+        #
+        # Remembered as dismissed too: both "skip" and "cancel" are the room
+        # saying this address is not a server to register, and a firewall or
+        # gateway that keeps coming up in conversation should not re-trigger
+        # the card on every mention.
+        _dismissed_hosts.setdefault(chat_id, set()).add(pending["host"])
         _pending_newhost.pop(chat_id, None)
         await query.edit_message_text(_t(lang,
             "💬 Answering without registering. I still have no access there.",
@@ -11503,7 +11530,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # From here on, work with the SCRUBBED text: the credential must not
         # reach _pending_newhost, the model, or anything downstream.
         safe_text = scrub_password(msg.text)
-        unknown = unregistered_hosts_in(safe_text)
+        dismissed = _dismissed_hosts.get(update.effective_chat.id, ())
+        unknown = [h for h in unregistered_hosts_in(safe_text) if h not in dismissed]
         if unknown:
             await offer_register_host(update, context, unknown[0],
                                       parse_host_hints(safe_text), safe_text)
