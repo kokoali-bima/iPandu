@@ -2990,6 +2990,16 @@ BACKEND_LABELS.update({t["model"]: t["label"] for t in EXTRA_TIERS})
 ALL_TIERS = TIERS + EXTRA_TIERS
 
 
+def _pin_agy_for_voice(forced_tier: Optional[dict], force_agy: bool) -> Optional[dict]:
+    """A voice turn must run on a model that can hear. Pin it to an agy tier
+    unless the user already chose one -- an explicit agy /usemodel choice is
+    left alone, and a Claude choice (or none) is overridden for this turn.
+    Only ever called with force_agy=True on a turn carrying a voice file."""
+    if force_agy and (forced_tier is None or forced_tier.get("provider") != "agy"):
+        return next((t for t in ALL_TIERS if t.get("provider") == "agy"), forced_tier)
+    return forced_tier
+
+
 # --------------------------------------------------------------------------
 # Session persistence: telegram chat_id -> { active: name, sessions: {name: {
 #   "claude": {model: session_id}, "agy": {model: conversation_id}
@@ -10451,6 +10461,77 @@ async def _save_incoming_image(update: Update, context: ContextTypes.DEFAULT_TYP
         return None
 
 
+async def _save_incoming_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[Path]:
+    """Download a voice note or audio file to something the model can hear.
+
+    agy (Gemini) decodes audio natively from a local path -- verified live on a
+    440 Hz tone it named as A4 -- so a voice message is transcribed and acted on
+    with no speech-to-text service, no API key and no new dependency, the same
+    way an image already is. Converted to 16 kHz mono WAV: the format that
+    verification used and the cleanest input for speech. Gemini reads the raw
+    .oga too, so a missing ffmpeg is a fallback, not a failure."""
+    msg = update.effective_message
+    if msg is None:
+        return None
+
+    def _pick(m) -> tuple[Optional[str], Optional[int]]:
+        if m is None:
+            return None, None
+        if getattr(m, "voice", None):
+            return m.voice.file_id, m.voice.file_size
+        if getattr(m, "audio", None):
+            return m.audio.file_id, m.audio.file_size
+        if m.document and (m.document.mime_type or "").startswith("audio/"):
+            return m.document.file_id, m.document.file_size
+        return None, None
+
+    file_id, size = _pick(msg)
+    if not file_id:
+        # Same group case as images: the voice note is in the message being
+        # replied to, and the reply is just the @mention.
+        file_id, size = _pick(getattr(msg, "reply_to_message", None))
+    if not file_id:
+        return None
+    if size and size > MAX_INCOMING_MEDIA_BYTES:
+        logger.warning("incoming voice too large (%s bytes), skipped", size)
+        return None
+
+    try:
+        INCOMING_MEDIA_DIR.mkdir(exist_ok=True)
+        tg_file = await context.bot.get_file(file_id)
+        suffix = Path(tg_file.file_path or "").suffix or ".oga"
+        raw = INCOMING_MEDIA_DIR / f"{_dt.datetime.now():%Y%m%d-%H%M%S}-{file_id[-8:]}{suffix}"
+        await tg_file.download_to_drive(custom_path=str(raw))
+        try:
+            raw.chmod(0o600)
+        except OSError:
+            pass
+
+        ff = _ffmpeg()
+        if ff:
+            wav = raw.with_suffix(".wav")
+            proc = await asyncio.get_running_loop().run_in_executor(
+                None, functools.partial(
+                    subprocess.run,
+                    [ff, "-y", "-i", str(raw), "-ac", "1", "-ar", "16000", str(wav)],
+                    capture_output=True, text=True, timeout=120))
+            if proc.returncode == 0 and wav.exists():
+                try:
+                    wav.chmod(0o600)
+                except OSError:
+                    pass
+                raw.unlink(missing_ok=True)
+                logger.info("saved incoming voice: %s (%s bytes)", wav, wav.stat().st_size)
+                return wav
+            logger.warning("ffmpeg could not convert the voice note; using raw (%s)",
+                           (proc.stderr or "")[-200:])
+        logger.info("saved incoming voice (raw): %s (%s bytes)", raw, raw.stat().st_size)
+        return raw
+    except Exception:
+        logger.warning("could not download an incoming voice message", exc_info=True)
+        return None
+
+
 def _prune_incoming_media(keep_hours: int = 24) -> None:
     """Old downloads are deleted on the next one. Without this the directory
     only ever grows, on a box whose disk nobody is watching."""
@@ -10550,6 +10631,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if mention_span is not None:
         text = _strip_entity(text, *mention_span).strip()
 
+    # Only look for voice if there was no image -- one attachment per message.
+    voice_path = await _save_incoming_voice(update, context) if image_path is None else None
+    force_agy = False
+
     if image_path is not None:
         question = text.strip() or _t(_chat_lang(update),
             "Describe this image and tell me anything notable about it.",
@@ -10557,6 +10642,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         text = (f"{question}\n\n"
                 f"[The user attached an image. Read it from this path before "
                 f"answering: {image_path}]")
+    elif voice_path is not None:
+        # Claude cannot hear, so this turn is pinned to an agy tier below. The
+        # model transcribes the audio itself and answers the transcription as
+        # if it had been typed.
+        typed = text.strip()
+        extra = f" They also typed: {typed!r}." if typed else ""
+        text = ("[The user sent a VOICE message instead of typing. Listen to "
+                "the audio file, transcribe what they actually said -- it may "
+                "be Indonesian or English -- and respond to that as their "
+                "message." + extra + f" Audio file to read: {voice_path}]")
+        force_agy = True
     elif msg.photo or msg.document:
         # Something WAS attached, and it isn't an image this can pass on.
         # Say so rather than staying silent.
@@ -10572,7 +10668,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # one, the block above has already supplied a question.
     if not text.strip():
         return
-    await _run_turn(update, context, text)
+    await _run_turn(update, context, text, force_agy=force_agy)
 
 
 async def _maybe_notify_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -10609,7 +10705,8 @@ async def _maybe_notify_update(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.warning("update check failed", exc_info=True)
 
 
-async def _run_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+async def _run_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str,
+                    force_agy: bool = False) -> None:
     """One agent turn, serialised per chat and capped process-wide.
 
     The work itself is in _run_turn_inner; this wrapper exists only to hold
@@ -10619,10 +10716,11 @@ async def _run_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, text: st
     """
     async with _chat_turn_lock(str(update.effective_chat.id)):
         async with _turn_semaphore():
-            await _run_turn_inner(update, context, text)
+            await _run_turn_inner(update, context, text, force_agy=force_agy)
 
 
-async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str,
+                          force_agy: bool = False) -> None:
     """One agent turn, start to finish.
 
     Separate from handle_message because a turn can also be started by the
@@ -10646,6 +10744,7 @@ async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, te
 
     forced_model = _read_model_overrides().get(chat_id)
     forced_tier = next((t for t in ALL_TIERS if t["model"] == forced_model), None) if forced_model else None
+    forced_tier = _pin_agy_for_voice(forced_tier, force_agy)
     # Owner's extra scope only in their OWN private chat -- never a group,
     # even one the owner is speaking in. See owner_scope_text()/run_combo.
     owner_dm = _is_owner(update) and update.effective_chat.type == "private"
@@ -11157,7 +11256,8 @@ def main() -> None:
     app.add_handler(CommandHandler("forget", cmd_forget))
     app.add_error_handler(on_error)
     app.add_handler(MessageHandler(
-        (filters.TEXT | filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND,
+        (filters.TEXT | filters.PHOTO | filters.VOICE | filters.AUDIO
+         | filters.Document.ALL) & ~filters.COMMAND,
         handle_message))
     # Edited messages reach the same handler, but ONLY here: commands still
     # ignore them, because that is where the crash was.

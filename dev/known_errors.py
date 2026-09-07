@@ -356,4 +356,26 @@ ERRORS = [
         "guard": "test_safe_answer.py",
         "release": "v0.2b.88",
     },
+    {
+        "id": "E021",
+        "date": "2026-09-07",
+        "area": "Voice input",
+        "symptom": "On the bscloud agent, a voice message got no response. Text "
+                   "worked, and the bot could even reply with voice (Gemini "
+                   "generates the audio), but speaking to it did nothing.",
+        "cause": "The message handler registered TEXT, PHOTO and Document only. "
+                 "A voice note (or audio file) matched no handler and was "
+                 "dropped silently -- the worst failure shape here, since the "
+                 "sender has no idea it arrived.",
+        "fix": "VOICE and AUDIO are registered too. A voice message is saved, "
+               "converted to 16 kHz mono WAV, and its path named in the prompt "
+               "the way an image already is; agy (Gemini) decodes the audio "
+               "natively -- no STT service, no API key, no new dependency. "
+               "Because Claude cannot hear, a voice turn is pinned to an agy "
+               "tier, and only a voice turn is. Verified end to end on the "
+               "bscloud host: a spoken 'restart the web server on node three "
+               "and check disk usage' was transcribed and acted on.",
+        "guard": "test_voice_input.py",
+        "release": "v0.2b.89",
+    },
 ]

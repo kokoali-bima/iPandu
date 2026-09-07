@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.2b.89 -- speak to it, not just type
+
+The bot answered typed messages and could even reply with voice -- Gemini
+generates the audio itself and the bot delivers it -- but a voice message *in*
+did nothing at all. The message handler registered TEXT, PHOTO and Document; a
+voice note matched none of them and was dropped without a word, which is the
+worst way for anything here to fail, because the person has no idea it arrived.
+
+It turns out no speech-to-text service was needed. agy (Gemini) decodes audio
+natively from a local file path -- verified on the bscloud host on a 440 Hz tone
+it named as A4, and then end to end on real speech: a spoken "restart the web
+server on node three and check disk usage" was transcribed and acted on, both
+halves. So a voice message is now handled exactly the way an image already is:
+saved, converted to a 16 kHz mono WAV, and named in the prompt for the model to
+read. No API key, no new dependency, no extra cost beyond the turn itself.
+
+The one real difference from an image is that Claude cannot hear. So a voice
+turn -- and only a voice turn -- is pinned to an agy tier: if the chat's
+/usemodel choice is a Claude model, or there is none, this single turn runs on
+Gemini instead, and the reply tag shows what answered. An explicit agy choice is
+left exactly as set. A typed or image turn is never touched; the model you chose
+still answers those.
+
+Voice notes in the message being *replied to* are picked up as well, the same
+way images are, so tagging the bot under someone else's voice note in a group
+works. If ffmpeg is missing the raw audio is used rather than dropped, since
+Gemini reads .oga too.
+
+Nothing about replying with voice changed -- that already worked, because it is
+Gemini generating the audio, not a TTS engine here. This release is only about
+being able to listen.
+
+Registered as E021. **1,032 checks across 47 suites.**
+
 ## v0.2b.88 -- a flaky link to Telegram no longer aborts PIN entry
 
 Found on the bscloud agent, which has a slow path to Telegram. The operator was
