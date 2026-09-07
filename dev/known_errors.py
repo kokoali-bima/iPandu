@@ -399,4 +399,45 @@ ERRORS = [
         "guard": "test_document_input.py",
         "release": "v0.2b.90",
     },
+    {
+        "id": "E023",
+        "date": "2026-09-07",
+        "area": "Add server",
+        "symptom": "'tolong carikan 2 ip dari subnet 10.10.59.0/24' got "
+                   "'10.10.59.0 belum ada di inventaris -- daftarkan?'. A "
+                   "create-VM prompt did the same with its gateway and DNS, and "
+                   "that offer hijacked the whole task.",
+        "cause": "unregistered_hosts_in swept every IPv4 in the text and treated "
+                 "any it did not know as a host to register -- including a "
+                 "subnet's network address (the .0 in 10.10.59.0/24), a "
+                 "broadcast address, a gateway, and a DNS server.",
+        "fix": "It now walks matches with position and excludes CIDR notation "
+               "(IP followed by /digits), network/broadcast addresses (last "
+               "octet 0 or 255), and IPs introduced by gateway/DNS/subnet/"
+               "netmask/nameserver words just before them. A genuine unknown "
+               "host is still detected.",
+        "guard": "test_subnet_and_pw_consent.py",
+        "release": "v0.2b.91",
+    },
+    {
+        "id": "E024",
+        "date": "2026-09-07",
+        "area": "Credential safety",
+        "symptom": "A create-VM prompt that carried the VM's own credential had "
+                   "its ENTIRE message deleted the instant a password was seen, "
+                   "without asking -- and the task was then dropped and never "
+                   "ran.",
+        "cause": "The credential guard called msg.delete() automatically and "
+                 "returned, on the assumption a typed password is always an "
+                 "accident. On a message that IS the task, both were wrong: it "
+                 "destroyed the operator's whole prompt and refused to do the "
+                 "work.",
+        "fix": "No auto-delete. The warning now offers a '🗑 Delete the message' "
+               "button (cmd_pwdelete_button) so removal is the operator's "
+               "choice, and the turn is no longer dropped -- the task runs, its "
+               "credential reaching the model because the task needs it, with "
+               "the PIN still gating the writes.",
+        "guard": "test_subnet_and_pw_consent.py",
+        "release": "v0.2b.91",
+    },
 ]

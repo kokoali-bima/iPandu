@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.2b.91 -- a subnet is not a server, and your message is not deleted unasked
+
+Two faults from one screenshot. Asking "carikan 2 ip dari subnet 10.10.59.0/24"
+got back "10.10.59.0 belum ada di inventaris -- daftarkan?", and a longer
+create-VM prompt both had its message deleted and got hijacked into the add-
+server wizard before it ran. Neither was what the operator asked for.
+
+**A subnet is not a host.** `unregistered_hosts_in` swept every IPv4 in the text
+and offered to register any it did not recognise -- including the network
+address of a subnet written in CIDR (the `.0` in `10.10.59.0/24`), a broadcast
+address, a gateway, and a DNS server. It now looks at what surrounds each
+address: an IP in CIDR form, one whose last octet is 0 or 255, or one introduced
+by the words gateway / DNS / subnet / netmask / nameserver is a parameter of a
+task, not a machine, and is passed over. A genuine unknown host -- "fix the app
+on 192.0.2.10" -- is still detected exactly as before.
+
+**Your message is not deleted without your say-so.** The credential guard used
+to call `delete()` the instant it saw a password, destroying the whole message
+-- and on a create-VM prompt that whole message was the task, with the VM's own
+credential a deliberate part of it. Worse, the turn was then dropped, so the
+work never happened. Now the bot warns and offers a **🗑 Delete the message**
+button; removal is your choice, and the message stays until you make it. The
+task runs -- the credential reaches the model because the task needs it -- and
+the PIN still gates the actual writes. Nothing is deleted automatically.
+
+This is the input side of a larger change the operator asked for. Still to come:
+after a task that creates machines finishes, an offer to register the new ones,
+and -- on choosing hypervisor or VM -- adding them to /servers directly, without
+walking the wizard.
+
+Registered as E023 and E024. **1,067 checks across 49 suites.**
+
 ## v0.2b.90 -- read the file, whatever it is
 
 Sending a PDF or an HTML file got "I can read images, but not this kind of

@@ -1387,19 +1387,44 @@ def _valid_ipv4(text: str) -> bool:
     return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
 
 
-def unregistered_hosts_in(text: str) -> list[str]:
-    """IPv4 addresses in `text` that the inventory has never heard of.
+# The words that, right before an IP, mean it is not a host to register: a
+# gateway, a DNS/nameserver, a subnet or its mask. "gateway: 10.10.59.254" and
+# "dns: 10.10.59.77" are parameters of a task, not machines.
+_NOT_A_HOST_BEFORE = re.compile(
+    r"(?:gateway|gw|dns|nameserver|name\s*server|subnet|netmask|mask|network|"
+    r"broadcast)\W*$", re.I)
 
-    Private-range and public alike -- what matters is whether we know it, not
-    where it lives. Loopback and 0.0.0.0 are dropped: they are never a machine
-    someone wants registered, and they show up in log excerpts constantly.
+
+def unregistered_hosts_in(text: str) -> list[str]:
+    """IPv4 addresses in `text` that the inventory has never heard of AND that
+    are plausibly a machine someone wants registered.
+
+    Not every IPv4 is a host. A subnet in CIDR form (10.10.59.0/24), a network
+    or broadcast address (last octet 0 or 255), and an IP introduced as a
+    gateway/DNS/subnet are excluded -- offering to 'register' any of those is
+    the bug this guard was tightened for. Loopback and the all-zero/all-ones
+    addresses stay excluded too; they fill log excerpts and are never a host.
     """
+    text = text or ""
     known = _known_hosts()
     out: list[str] = []
-    for cand in _IPV4_RE.findall(text or ""):
+    for m in _IPV4_RE.finditer(text):
+        cand = m.group(0)
         if not _valid_ipv4(cand):
             continue
         if cand.startswith("127.") or cand in ("0.0.0.0", "255.255.255.255"):
+            continue
+        # CIDR: an IP immediately followed by "/<digits>" is a subnet, not a host.
+        rest = text[m.end():m.end() + 4]
+        if rest[:1] == "/" and rest[1:2].isdigit():
+            continue
+        # Network / broadcast address of the common /24.
+        last = cand.rsplit(".", 1)[-1]
+        if last in ("0", "255"):
+            continue
+        # Introduced as a gateway / DNS / subnet by the words just before it.
+        before = text[max(0, m.start() - 24):m.start()]
+        if _NOT_A_HOST_BEFORE.search(before):
             continue
         low = cand.lower()
         if low not in known and low not in out:
@@ -1499,51 +1524,55 @@ def scrub_password(text: str) -> str:
     return _PASSWORD_RE.sub(_mask, text or "")
 
 
-async def warn_password_in_chat(update: Update, deleted: bool) -> None:
-    """Say why that was a bad idea, and what happens instead.
+async def warn_password_in_chat(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                orig_message_id: int) -> None:
+    """Flag a typed password and OFFER to remove it -- never delete unasked.
 
-    Deliberately not a scolding. The operator did the natural thing -- they were
-    handing over what the machine needs -- and the reason it is wrong is not
-    obvious unless someone says it once, plainly.
+    Deleting the message the instant a password appeared destroyed everything
+    else in it, without consent, and on a message that is itself the task that
+    was the wrong move twice over. So the message stays, a button removes it if
+    the operator wants, and the task still runs -- the PIN gates the writes.
     """
     lang = _chat_lang(update)
+    can_delete = await bot_can_delete_here(update, context)
     in_group = getattr(update.effective_chat, "type", "private") != "private"
-    if deleted:
-        gone = _t(lang, "I deleted your message.",
-                        "Pesan Anda sudah saya hapus.")
-    elif in_group:
-        # Name the exact right, and name what is NOT needed. "Make the bot an
-        # admin" reads like handing over the room; the only thing required here
-        # is deleting messages.
+
+    kb = None
+    if can_delete:
         gone = _t(lang,
-                  "I could not delete it — please delete it yourself. To let me "
-                  "clean these up here, make me an admin with <b>Delete "
-                  "messages</b> only; I do not need to add or remove members.",
-                  "Saya tidak bisa menghapusnya — tolong hapus sendiri. Supaya "
-                  "saya bisa membersihkannya di sini, jadikan saya admin dengan "
-                  "izin <b>Hapus pesan</b> saja; saya tidak butuh izin menambah "
-                  "atau mengeluarkan anggota.")
+                  "I did <b>not</b> delete it -- that is your call. Tap below to remove it.",
+                  "Saya <b>tidak</b> menghapusnya -- itu keputusan Anda. Tekan di bawah untuk menghapus.")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+            _t(lang, "🗑 Delete the message", "🗑 Hapus pesannya"),
+            callback_data=f"pwdel:{orig_message_id}")]])
+    elif in_group:
+        gone = _t(lang,
+                  "I cannot delete it here -- please delete it yourself. To let me "
+                  "clean these up, make me an admin with <b>Delete messages</b> only.",
+                  "Saya tidak bisa menghapusnya di sini -- tolong hapus sendiri. Supaya "
+                  "saya bisa membersihkannya, jadikan saya admin dengan izin <b>Hapus "
+                  "pesan</b> saja.")
     else:
-        gone = _t(lang, "I could not delete your message — please delete it yourself.",
-                        "Pesan Anda tidak bisa saya hapus — tolong hapus sendiri.")
+        gone = _t(lang, "Please delete it yourself.",
+                        "Tolong hapus sendiri.")
+
     await _msg(update).reply_text(
         _t(lang,
            f"⚠️ <b>That looked like a password.</b> {gone}\n\n"
            "A password typed here is stored in this chat's history, on your "
-           "device, on mine, and on Telegram's servers. Deleting it does not "
+           "device, on mine, and on Telegram's servers. Removing it does not "
            "undo that it was sent. Treat it as exposed and change it.\n\n"
-           "<b>You never need to send me one.</b> When a machine needs "
-           "credentials I ask for them in a wizard, on a keypad, where nothing "
-           "becomes a chat message.",
+           "<i>The task still runs</i> -- I only flag the credential. "
+           "You never need to send me one; when a machine needs it, a wizard "
+           "asks on a keypad.",
            f"⚠️ <b>Itu tadi terlihat seperti password.</b> {gone}\n\n"
            "Password yang diketik di sini tersimpan di riwayat chat ini, di HP "
            "Anda, di sisi saya, dan di server Telegram. Menghapusnya tidak "
-           "membatalkan fakta bahwa ia sempat terkirim. Anggap sudah bocor, "
-           "dan ganti.\n\n"
-           "<b>Anda tidak pernah perlu mengirimkannya ke saya.</b> Kalau sebuah "
-           "mesin butuh kredensial, saya yang akan meminta lewat wizard, di "
-           "keypad, sehingga tidak ada yang jadi pesan chat."),
-        parse_mode="HTML")
+           "membatalkan fakta bahwa ia sempat terkirim. Anggap sudah bocor, dan ganti.\n\n"
+           "<i>Tugasnya tetap dijalankan</i> -- saya hanya menandai kredensialnya. "
+           "Anda tidak pernah perlu mengirimkannya; kalau sebuah mesin butuh, "
+           "wizard yang meminta di keypad."),
+        parse_mode="HTML", reply_markup=kb)
 
 
 def parse_host_hints(text: str) -> dict:
@@ -9292,6 +9321,28 @@ async def offer_register_host(update: Update, context: ContextTypes.DEFAULT_TYPE
         parse_mode="HTML", reply_markup=kb)
 
 
+async def cmd_pwdelete_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove the flagged message -- only when the operator taps to ask."""
+    query = update.callback_query
+    lang = _chat_lang(update)
+    await _safe_answer(query)
+    try:
+        mid = int(query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return
+    try:
+        await context.bot.delete_message(update.effective_chat.id, mid)
+        await query.edit_message_text(_t(lang,
+            "🗑 Deleted. Still treat that password as exposed and change it.",
+            "🗑 Terhapus. Tetap anggap password itu sudah bocor dan ganti."))
+    except Exception:
+        await query.edit_message_text(_t(lang,
+            "I could not delete it -- the 48-hour limit, or it is already gone. "
+            "Please remove it yourself.",
+            "Tidak bisa saya hapus -- batas 48 jam, atau sudah tidak ada. "
+            "Tolong hapus sendiri."))
+
+
 async def cmd_newhost_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Answer to the unknown-host card."""
     query = update.callback_query
@@ -10634,20 +10685,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # every message, and unlike an instruction in a brief it cannot be
         # talked out of firing.
         if mentions_password(msg.text):
-            deleted = False
-            if await bot_can_delete_here(update, context):
-                try:
-                    await msg.delete()
-                    deleted = True
-                except Exception:
-                    # Rights can be right and the call still fail -- the 48-hour
-                    # limit, a race with the user deleting it first. Say so
-                    # rather than implying it is gone when it is not.
-                    logger.warning("could not delete a message containing a credential")
-            else:
-                logger.warning("no permission to delete a credential in chat=%s",
-                               update.effective_chat.id)
-            await warn_password_in_chat(update, deleted)
+            # No auto-delete: that destroyed the operator's whole message without
+            # consent. Warn and offer a button; the task itself still runs.
+            await warn_password_in_chat(update, context, msg.message_id)
 
         # From here on, work with the SCRUBBED text: the credential must not
         # reach _pending_newhost, the model, or anything downstream.
@@ -10657,10 +10697,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await offer_register_host(update, context, unknown[0],
                                       parse_host_hints(safe_text), safe_text)
             return
-        if mentions_password(msg.text):
-            # Warned, nothing else to register: do not hand the credential to a
-            # model as well.
-            return
+        # A password used to end the turn here. It no longer does: the operator
+        # confirmed the task should run (the credential is part of it), gated by
+        # the PIN when the model reaches a write.
 
     # An attached image, saved somewhere the model can open. A screenshot with
     # a caption -- "look at this, which one do I pick?" -- used to match no
@@ -11299,6 +11338,7 @@ def main() -> None:
     app.add_handler(CommandHandler("rmmcp", cmd_rmmcp))
     app.add_handler(CommandHandler("mcpservers", cmd_mcpservers))
     app.add_handler(CommandHandler("gdrivestatus", cmd_gdrivestatus))
+    app.add_handler(CallbackQueryHandler(cmd_pwdelete_button, pattern="^pwdel:"))
     app.add_handler(CallbackQueryHandler(cmd_server_button, pattern="^srv:"))
     app.add_handler(CallbackQueryHandler(cmd_needwrite_button, pattern="^nw:"))
     app.add_handler(CallbackQueryHandler(cmd_newhost_button,
