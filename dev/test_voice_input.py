@@ -164,8 +164,9 @@ check("the message handler now registers VOICE and AUDIO",
       "filters.VOICE" in src and "filters.AUDIO" in src)
 check("force_agy is set ONLY on the voice branch, nowhere else",
       src.count("force_agy = True") == 1)
+voice_branch = src.split("elif voice_path is not None:")[1].split("    elif ")[0]
 check("...and the voice branch is what sets it",
-      "force_agy = True" in src.split("voice_path is not None")[1].split("elif")[0])
+      "force_agy = True" in voice_branch)
 check("the voice prompt tells the model to transcribe and answer",
       "transcribe what they actually said" in src)
 check("_run_turn threads force_agy down to the inner turn",

@@ -10532,6 +10532,56 @@ async def _save_incoming_voice(update: Update, context: ContextTypes.DEFAULT_TYP
         return None
 
 
+async def _save_incoming_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Download a document attachment (PDF, HTML, text, csv, ...) to a local
+    path the model can read. Returns (path, original_filename) or None.
+
+    Images and audio are handled by their own helpers first, so whatever reaches
+    here is a document to be read as-is. Both CLIs read it from disk when the
+    prompt names the path -- verified live on itbutler, agy and claude each read
+    a PDF and an HTML file and returned the marker string inside -- so there is
+    no per-format extraction, no forced model, and no new dependency. The
+    original extension is kept, because the CLI's reader uses it to decide how
+    to open the file."""
+    msg = update.effective_message
+    if msg is None:
+        return None
+
+    def _pick(m):
+        if m is None or not getattr(m, "document", None):
+            return None, None, None
+        d = m.document
+        return (d.file_id, getattr(d, "file_size", None),
+                getattr(d, "file_name", "") or "")
+
+    file_id, size, fname = _pick(msg)
+    if not file_id:
+        # The file is very often in the message being replied to, with the
+        # reply just the @mention -- the same group case images already handle.
+        file_id, size, fname = _pick(getattr(msg, "reply_to_message", None))
+    if not file_id:
+        return None
+    if size and size > MAX_INCOMING_MEDIA_BYTES:
+        logger.warning("incoming document too large (%s bytes), skipped", size)
+        return None
+
+    try:
+        INCOMING_MEDIA_DIR.mkdir(exist_ok=True)
+        tg_file = await context.bot.get_file(file_id)
+        suffix = (Path(fname).suffix or Path(tg_file.file_path or "").suffix or ".bin")
+        dest = INCOMING_MEDIA_DIR / f"{_dt.datetime.now():%Y%m%d-%H%M%S}-{file_id[-8:]}{suffix}"
+        await tg_file.download_to_drive(custom_path=str(dest))
+        try:
+            dest.chmod(0o600)
+        except OSError:
+            pass
+        logger.info("saved incoming document: %s (%s bytes)", dest, dest.stat().st_size)
+        return dest, (fname or dest.name)
+    except Exception:
+        logger.warning("could not download an incoming document", exc_info=True)
+        return None
+
+
 def _prune_incoming_media(keep_hours: int = 24) -> None:
     """Old downloads are deleted on the next one. Without this the directory
     only ever grows, on a box whose disk nobody is watching."""
@@ -10633,6 +10683,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Only look for voice if there was no image -- one attachment per message.
     voice_path = await _save_incoming_voice(update, context) if image_path is None else None
+    # And a document only if it was neither an image nor audio.
+    doc_info = (await _save_incoming_document(update, context)
+                if image_path is None and voice_path is None else None)
+    if voice_path is not None or doc_info is not None:
+        _prune_incoming_media()
     force_agy = False
 
     if image_path is not None:
@@ -10653,14 +10708,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "be Indonesian or English -- and respond to that as their "
                 "message." + extra + f" Audio file to read: {voice_path}]")
         force_agy = True
+    elif doc_info is not None:
+        doc_path, fname = doc_info
+        question = text.strip() or _t(_chat_lang(update),
+            "Read this file and tell me what is in it -- summarise it and flag "
+            "anything notable.",
+            "Baca file ini dan beri tahu isinya -- ringkas dan sebutkan hal "
+            "yang penting.")
+        text = (f"{question}\n\n"
+                f"[The user attached a file named {fname!r}. Read it from this "
+                f"path before answering: {doc_path}]")
     elif msg.photo or msg.document:
-        # Something WAS attached, and it isn't an image this can pass on.
-        # Say so rather than staying silent.
+        # An attachment WAS present but could not be downloaded or saved (a
+        # transient fetch failure, or over the size cap). Say so rather than
+        # staying silent -- but never claim documents are unreadable, because
+        # they are not any more.
         return await msg.reply_text(_t(_chat_lang(update),
-            "I can read images (a screenshot, a photo), but not this kind of "
-            "attachment. Send it as an image, or describe it in text.",
-            "Saya bisa membaca gambar (screenshot, foto), tapi bukan lampiran "
-            "jenis ini. Kirim sebagai gambar, atau jelaskan dalam teks."))
+            "I could not read that attachment -- try sending it again, or paste "
+            "the text.",
+            "Saya tidak berhasil membaca lampiran itu -- coba kirim ulang, atau "
+            "tempel teksnya."))
 
     # Nothing left to act on -- but a bare "@botname" with no other word is a
     # real thing people send, and returning here is what made the bot look

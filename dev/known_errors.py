@@ -378,4 +378,25 @@ ERRORS = [
         "guard": "test_voice_input.py",
         "release": "v0.2b.89",
     },
+    {
+        "id": "E022",
+        "date": "2026-09-07",
+        "area": "Document input",
+        "symptom": "On the itbutler agent, sending a PDF or an HTML file got "
+                   "'I can read images, but not this kind of attachment'. The "
+                   "file was never read.",
+        "cause": "Images had their own handler and audio had just gotten one, "
+                 "but every other document fell through to a refusal branch and "
+                 "was never saved or passed to a model -- despite both CLIs "
+                 "being perfectly able to read a file from a path.",
+        "fix": "_save_incoming_document downloads any document (keeping its "
+               "extension) and names its path in the prompt, the way an image "
+               "already is; whichever tier answers reads it -- no forced model, "
+               "no per-format extraction, no new dependency. Verified live on "
+               "itbutler: agy AND claude each read a test PDF and a test HTML "
+               "and returned the marker string inside. The old refusal now only "
+               "fires on a genuine download failure, and says so honestly.",
+        "guard": "test_document_input.py",
+        "release": "v0.2b.90",
+    },
 ]

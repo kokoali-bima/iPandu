@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.2b.90 -- read the file, whatever it is
+
+Sending a PDF or an HTML file got "I can read images, but not this kind of
+attachment", and the file was never read. Images had a handler and audio had
+just gotten one, but every other document fell through to that refusal -- even
+though both CLIs are perfectly able to read a file from a path.
+
+They are, and it needed nothing new. Verified live on the itbutler host before
+writing this: agy AND claude were each handed a test PDF and a test HTML, and
+each returned the exact marker string hidden inside. So a document attachment is
+now saved -- keeping its extension, which the reader uses to open it right -- and
+its path is named in the prompt the way an image already is. Whichever tier
+answers reads it: no forced model, no per-format extraction, no new dependency.
+A PDF, an HTML page, a CSV, a log, a text file -- "maupun file lainnya" -- all go
+through, and even an archive reaches the model, which can list or extract it with
+its own tools rather than being turned away at the door.
+
+The "I can only read images" refusal is gone. What replaces it fires only when a
+download genuinely fails -- a fetch error, or a file over the 20 MB cap -- and it
+says that honestly instead of claiming the format is unreadable. A document in
+the message being replied to is picked up too, the same way images are, so
+tagging the bot under someone else's PDF in a group works.
+
+Registered as E022. **1,047 checks across 48 suites.**
+
 ## v0.2b.89 -- speak to it, not just type
 
 The bot answered typed messages and could even reply with voice -- Gemini

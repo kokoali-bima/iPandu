@@ -135,17 +135,38 @@ async def main():
     check("an image sent as a FILE rather than a photo is handled too",
           captured3.get("text") and str(mod.INCOMING_MEDIA_DIR) in captured3["text"])
 
-    # --- 5. THE rule: never silent ------------------------------------------
+    # --- 5. any document type is handed to the model now, not refused -------
+    # The bot used to reply "I can only read images" to anything else. Both CLIs
+    # read files from disk with their tools, so a document -- here a zip, chosen
+    # as the least text-like case -- reaches the model, which decides what to do
+    # with it. The operator asked for HTML, PDF "maupun file lainnya".
+    captured4 = {}
+    async def fake_turn4(update, context, text, **kw):
+        captured4["text"] = text
     u4 = upd(caption="here", document_mime="application/zip")
-    with patch.object(mod, "_run_turn", side_effect=AssertionError("must not reach the model")), \
+    with patch.object(mod, "_run_turn", side_effect=fake_turn4), \
          patch.object(mod, "_handle_wizard_input", new=AsyncMock(return_value=False)), \
          patch.object(mod, "_handle_server_input", new=AsyncMock(return_value=False)):
         await mod.handle_message(u4, ctx([]))
-    check("an attachment that cannot be read gets a REPLY saying so, never "
-          "silence -- silence leaves the sender unable to tell whether it "
-          "even arrived", u4.message.reply_text.call_args is not None)
-    said = u4.message.reply_text.call_args[0][0].lower()
-    check("...and says what WOULD work", "image" in said or "gambar" in said)
+    check("any document type -- a zip here -- is handed to the model, not "
+          "refused ('maupun file lainnya')",
+          bool(captured4.get("text")) and str(mod.INCOMING_MEDIA_DIR) in captured4["text"])
+
+    # --- 5b. THE rule still holds: a FAILED download is never silent --------
+    u4b = upd(caption="here", document_mime="application/pdf")
+    def boom_ctx():
+        c = ctx([])
+        c.bot.get_file = AsyncMock(side_effect=RuntimeError("telegram down"))
+        return c
+    with patch.object(mod, "_run_turn", side_effect=AssertionError("must not reach the model")), \
+         patch.object(mod, "_handle_wizard_input", new=AsyncMock(return_value=False)), \
+         patch.object(mod, "_handle_server_input", new=AsyncMock(return_value=False)):
+        await mod.handle_message(u4b, boom_ctx())
+    check("a document that cannot be downloaded still gets a REPLY, never silence",
+          u4b.message.reply_text.call_args is not None)
+    said = u4b.message.reply_text.call_args[0][0].lower()
+    check("...and says honestly that it could not be read",
+          "could not read" in said or "tidak berhasil" in said)
 
     # --- 6. plain text is untouched ----------------------------------------
     captured5 = {}
