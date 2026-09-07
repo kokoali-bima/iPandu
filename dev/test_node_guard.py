@@ -311,9 +311,9 @@ if shutil.which("bash"):
                               env={**os.environ, "HOME": bashpath(home)})
 
     if HAVE_KEYGEN:
-        ro_pub = mod.SSH_RO_KEY.with_suffix(".pub").read_text().strip()
+        ro_pub = mod.SSH_RO_KEY.with_suffix(".pub").read_text(encoding="utf-8").strip()
         ro_blob = ro_pub.split()[1]
-        rw_pub = mod.SSH_RW_KEY.with_suffix(".pub").read_text().strip()
+        rw_pub = mod.SSH_RW_KEY.with_suffix(".pub").read_text(encoding="utf-8").strip()
 
         # A machine prepared by hand: the read-only key present, unrestricted,
         # plus an unrelated key that has every right to still be there.
@@ -322,7 +322,7 @@ if shutil.which("bash"):
         (target / ".ssh").mkdir()
         ak = target / ".ssh" / "authorized_keys"
         someone_else = "ssh-rsa AAAAB3NzaC1yc2ETESTKEY admin@laptop"
-        ak.write_text(f"{someone_else}\n{ro_pub}\n{rw_pub}\n")
+        ak.write_text(f"{someone_else}\n{ro_pub}\n{rw_pub}\n", encoding="utf-8")
 
         script = capture_script(target)
         r = run_script(script, target)
@@ -331,7 +331,7 @@ if shutil.which("bash"):
         if r.returncode != 0:
             print("   stderr:", (r.stderr or "").strip()[:300])
 
-        lines = [l for l in ak.read_text().splitlines() if l.strip()]
+        lines = [l for l in ak.read_text(encoding="utf-8").splitlines() if l.strip()]
         ro_lines = [l for l in lines if ro_blob in l]
         # Stated as "no UNGUARDED line survives" rather than "the key appears
         # once": the fixture starts with exactly one unguarded line, so a
@@ -356,18 +356,18 @@ if shutil.which("bash"):
               any(l == rw_pub for l in lines))
         check("the pre-existing authorized_keys is backed up before being rewritten",
               (target / ".ssh" / "authorized_keys.ismart-bak").exists())
-        backup_first = (target / ".ssh" / "authorized_keys.ismart-bak").read_text()
+        backup_first = (target / ".ssh" / "authorized_keys.ismart-bak").read_text(encoding="utf-8")
         check("...and the backup holds the ORIGINAL, not our own output",
               ro_pub in backup_first and 'command="' not in backup_first)
 
         # Idempotence is what makes /secure safe to re-run, and re-running is
         # how the operator confirms nothing has drifted.
-        after_first = ak.read_text()
+        after_first = ak.read_text(encoding="utf-8")
         r2 = run_script(capture_script(target), target)
         check("re-running lands byte-for-byte the same file",
-              r2.returncode == 0 and ak.read_text() == after_first)
+              r2.returncode == 0 and ak.read_text(encoding="utf-8") == after_first)
         check("...and does NOT overwrite the backup with a copy of our own work",
-              (target / ".ssh" / "authorized_keys.ismart-bak").read_text() == backup_first)
+              (target / ".ssh" / "authorized_keys.ismart-bak").read_text(encoding="utf-8") == backup_first)
 
         # The other direction: prove the OLD logic really did leave this host
         # open, so nobody later "simplifies" the fix back into a presence check.
@@ -375,7 +375,7 @@ if shutil.which("bash"):
         atexit.register(_shutil.rmtree, str(legacy), ignore_errors=True)
         (legacy / ".ssh").mkdir()
         legacy_ak = legacy / ".ssh" / "authorized_keys"
-        legacy_ak.write_text(f"{ro_pub}\n")
+        legacy_ak.write_text(f"{ro_pub}\n", encoding="utf-8")
         old_check = (
             f"grep -qF '{ro_blob[:40]}' ~/.ssh/authorized_keys || "
             f"printf '%s\\n' '{mod._GUARD_KEY_OPTS} {ro_pub}' >> ~/.ssh/authorized_keys"
@@ -383,7 +383,7 @@ if shutil.which("bash"):
         run_script(old_check, legacy)
         check("the OLD presence-only check leaves the host unguarded -- the "
               "regression this section exists to prevent",
-              'command="' not in legacy_ak.read_text())
+              'command="' not in legacy_ak.read_text(encoding="utf-8"))
 
         # A clean machine must still work: this fix must not depend on there
         # being something to replace.
@@ -391,14 +391,14 @@ if shutil.which("bash"):
         atexit.register(_shutil.rmtree, str(fresh), ignore_errors=True)
         (fresh / ".ssh").mkdir()
         fresh_ak = fresh / ".ssh" / "authorized_keys"
-        fresh_ak.write_text("")
+        fresh_ak.write_text("", encoding="utf-8")
         r3 = run_script(capture_script(fresh), fresh)
-        fresh_lines = [l for l in fresh_ak.read_text().splitlines() if l.strip()]
+        fresh_lines = [l for l in fresh_ak.read_text(encoding="utf-8").splitlines() if l.strip()]
         check("a host with no keys at all still ends up guarded",
               r3.returncode == 0
               and any(ro_blob in l and l.startswith('command="') for l in fresh_lines))
         check("...and authorized_keys is never left empty",
-              fresh_ak.read_text().strip() != "")
+              fresh_ak.read_text(encoding="utf-8").strip() != "")
 else:
     print("SKIP - bash unavailable, generated-script execution cases skipped")
 

@@ -102,8 +102,8 @@ check("an empty detail does not crash the classifier",
 
 # --- 4. BOTH keys are offered, which is the operator's actual complaint ----
 if mod.ensure_write_mode_keys():
-    ro_pub = mod.agent_keypair()[1].read_text().strip()
-    rw_pub = mod.SSH_RW_KEY.with_suffix(".pub").read_text().strip()
+    ro_pub = mod.agent_keypair()[1].read_text(encoding="utf-8").strip()
+    rw_pub = mod.SSH_RW_KEY.with_suffix(".pub").read_text(encoding="utf-8").strip()
     block = mod.bootstrap_key_block("id")
     check("the key block is produced once the keypair exists", bool(block))
     check("it contains the key the CONNECTION TEST presents "

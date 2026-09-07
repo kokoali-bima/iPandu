@@ -84,10 +84,10 @@ def make_env(until=None, curl_ok=True):
     conf, base, binp = root / "conf", root / "deploy", root / "bin"
     for d in (conf, base, binp):
         d.mkdir(parents=True)
-    (conf / "api.key").write_text("KEYID:SECRET\n")
-    (conf / "base_url").write_text("https://10.0.0.1:1945\n")
+    (conf / "api.key").write_text("KEYID:SECRET\n", encoding="utf-8")
+    (conf / "base_url").write_text("https://10.0.0.1:1945\n", encoding="utf-8")
     if until is not None:
-        (base / "write_mode.json").write_text(json.dumps({"until": until}))
+        (base / "write_mode.json").write_text(json.dumps({"until": until}), encoding="utf-8")
     # Stub curl: records its arguments, and writes a plausible body for the
     # backup download so the rollback step can be made to succeed or fail on
     # demand.
@@ -97,7 +97,8 @@ def make_env(until=None, curl_ok=True):
         + ("for a in \"$@\"; do [ \"$prev\" = -o ] && printf '<opnsense/>' > \"$a\"; prev=\"$a\"; done\n"
            if curl_ok else
            "for a in \"$@\"; do [ \"$prev\" = -o ] && : > \"$a\"; prev=\"$a\"; done\nexit 22\n")
-        + "exit 0\n"
+        + "exit 0\n",
+        encoding="utf-8",
     )
     (binp / "curl").chmod(0o755)
     return root, conf, base, binp
@@ -127,7 +128,7 @@ check("...and it actually reached curl", (root / "curl.log").exists())
 # https:host:1945 -- still containing "host:1945/api/..." and still passing,
 # while curl silently produced nothing under -s.
 check("...against the configured base URL and path, scheme intact",
-      "https://10.0.0.1:1945/api/core/firmware/status" in (root / "curl.log").read_text())
+      "https://10.0.0.1:1945/api/core/firmware/status" in (root / "curl.log").read_text(encoding="utf-8"))
 check("...with no config backup taken, since nothing is being changed",
       not (base / "opnsense-backups").exists())
 
@@ -136,13 +137,13 @@ check("an explicit -X GET is still a read, not a write", r.returncode == 0)
 
 # Only ONE trailing slash is stripped, and only from the end.
 root, conf, base, binp = make_env(until=None)
-(conf / "base_url").write_text("https://10.0.0.1:1945/\n")
+(conf / "base_url").write_text("https://10.0.0.1:1945/\n", encoding="utf-8")
 run(root, conf, base, binp, "/api/core/firmware/status")
 check("a trailing slash in base_url is stripped without mangling the scheme",
-      "https://10.0.0.1:1945/api/core/firmware/status" in (root / "curl.log").read_text())
+      "https://10.0.0.1:1945/api/core/firmware/status" in (root / "curl.log").read_text(encoding="utf-8"))
 
 root, conf, base, binp = make_env(until=None)
-(conf / "base_url").write_text("172.16.10.20:1945\n")
+(conf / "base_url").write_text("172.16.10.20:1945\n", encoding="utf-8")
 r = run(root, conf, base, binp, "/api/core/firmware/status")
 check("a base_url with no scheme is refused rather than quietly failing in curl",
       r.returncode != 0 and "http" in (r.stdout + r.stderr))
@@ -178,7 +179,7 @@ check("an EXPIRED write-mode window is treated as closed", r.returncode != 0)
 # --- 3. writes work once write mode is open, and take a rollback point -----
 root, conf, base, binp = make_env(until=FUTURE)
 r = run(root, conf, base, binp, "/api/firewall/filter/addRule", "-X", "POST", "-d", "{}")
-log = (root / "curl.log").read_text() if (root / "curl.log").exists() else ""
+log = (root / "curl.log").read_text(encoding="utf-8") if (root / "curl.log").exists() else ""
 check("a write goes through once write mode is open", r.returncode == 0)
 backups = sorted((base / "opnsense-backups").glob("config-*.xml")) \
     if (base / "opnsense-backups").exists() else []
@@ -191,7 +192,7 @@ check("...and the real call still happened after it",
       "/api/firewall/filter/addRule" in log)
 check("the call is recorded in the deployment's own log",
       (base / "opnsense.log").exists()
-      and "WRITE" in (base / "opnsense.log").read_text())
+      and "WRITE" in (base / "opnsense.log").read_text(encoding="utf-8"))
 
 # One backup per unlock window, not one per call: a session of ten changes
 # should leave one rollback point, taken before the first of them.
@@ -203,7 +204,7 @@ check("a second write in the same window reuses that rollback point",
 # --- 4. no rollback point, no write ----------------------------------------
 root, conf, base, binp = make_env(until=FUTURE, curl_ok=False)
 r = run(root, conf, base, binp, "/api/firewall/filter/addRule", "-X", "POST", "-d", "{}")
-log = (root / "curl.log").read_text() if (root / "curl.log").exists() else ""
+log = (root / "curl.log").read_text(encoding="utf-8") if (root / "curl.log").exists() else ""
 check("when the backup download fails, the write is REFUSED", r.returncode != 0)
 check("...and the firewall call was never made",
       "/api/firewall/filter/addRule" not in log)
@@ -257,8 +258,8 @@ if callable(getattr(mod, "capabilities_brief", None)):
 
     conf = mod.OPNSENSE_CONF_DIR
     conf.mkdir(parents=True, exist_ok=True)
-    (conf / "api.key").write_text("K:S\n")
-    (conf / "base_url").write_text("https://x:1945\n")
+    (conf / "api.key").write_text("K:S\n", encoding="utf-8")
+    (conf / "base_url").write_text("https://x:1945\n", encoding="utf-8")
     configured = mod.capabilities_brief()
     check("once the credentials exist, the tool is described", "tools/opn" in configured)
     check("...and the model is pointed at the wrapper, not at raw curl",
