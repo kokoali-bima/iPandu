@@ -1439,7 +1439,13 @@ def needs_snapshot_offer(reason: str) -> bool:
 
 NEEDS_WRITE_RE = re.compile(r"^\s*NEEDS_WRITE:\s*(.+?)\s*$", re.MULTILINE)
 GUARD_REFUSAL = "refused -- this key is read-only"
-_VMID_RE = re.compile(r"\b(?:vm[\s-]?|vmid[\s:=-]*)(\d{2,6})\b", re.I)
+# {3,9} rather than {2,6}, because Proxmox will not accept anything under 100:
+# `qm snapshot 20 ...` answers "vmid: invalid format - value does not look like
+# a valid VM ID". A two-digit match is therefore never a VM -- it is a port, a
+# size, a percentage -- and taking it as one sent four ssh round trips after a
+# guest that cannot exist. Nine digits is the ceiling PVE itself enforces.
+_VMID_RE = re.compile(r"\b(?:vm[\s-]?|vmid[\s:=-]*)(\d{3,9})\b", re.I)
+VMID_MIN = 100
 # chat_id -> {"prompt", "reason", "vmid", "expires"}
 _pending_write: dict[int, dict] = {}
 PENDING_WRITE_TTL = 900
@@ -1710,32 +1716,70 @@ def guess_vmid(*texts: str) -> Optional[str]:
     for t in texts:
         if not t:
             continue
-        m = _VMID_RE.search(t)
-        if m:
-            return m.group(1)
+        for m in _VMID_RE.finditer(t):
+            if int(m.group(1)) >= VMID_MIN:
+                return m.group(1)
     return None
 
 
-def find_vm_node(vmid: str) -> Optional[str]:
-    """Which node hosts this VM. A read, so it works while still locked."""
+_CLUSTER_PROBE = (
+    "pvesh get /cluster/resources --type vm --output-format json 2>/dev/null; "
+    "echo '@@'; "
+    "pvesh get /cluster/status --output-format json 2>/dev/null")
+
+
+def find_vm_target(vmid: str) -> Optional[dict]:
+    """Where this guest lives, and what it is. A read, so it works while locked.
+
+    Returns {"node": <name>, "host": <address ssh can reach>, "type": "qemu"
+    or "lxc"}, because all three matter and the node NAME alone answered none
+    of them:
+
+      * `_snapshot_hosts()` orders candidates by comparing against server
+        ADDRESSES, so a name like "node2" matched nothing and the hint was
+        silently dead -- every snapshot started at whichever node happened to
+        be first and worked down the list.
+      * a container is snapshotted with `pct`, not `qm`. /cluster/resources
+        says which, and asking `qm` to snapshot an LXC fails in a way that
+        reads like the guest does not exist.
+
+    Both pvesh calls go out in one ssh invocation: the second maps node names
+    to addresses, and a second round trip to learn that is not worth it.
+    """
     for srv in _read_servers():
-        hosts = [srv["host"], *srv.get("cluster_hosts", [])]
-        for host in hosts[:1]:
+        if not _is_hypervisor(srv):
+            continue
+        for host in [srv["host"], *srv.get("cluster_hosts", [])]:
             try:
                 out = subprocess.run(
                     ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host,
-                     "pvesh get /cluster/resources --type vm --output-format json 2>/dev/null"],
+                     _CLUSTER_PROBE],
                     capture_output=True, text=True, timeout=45).stdout
-                for v in json.loads(out):
-                    if str(v.get("vmid")) == str(vmid):
-                        return v.get("node")
+                res_raw, _, status_raw = out.partition("@@")
+                guests = json.loads(res_raw)
             except Exception:
-                logger.debug("vm node lookup failed via %s", host, exc_info=True)
+                logger.debug("vm lookup failed via %s", host, exc_info=True)
+                continue
+            try:
+                addr = {n.get("name"): n.get("ip")
+                        for n in json.loads(status_raw) if n.get("name")}
+            except Exception:
+                addr = {}
+            for v in guests:
+                if str(v.get("vmid")) == str(vmid):
+                    node = v.get("node")
+                    return {"node": node,
+                            # Fall back to the host that answered: it is a real
+                            # node of this cluster, so it is a better first try
+                            # than nothing, and _snapshot_hosts still walks the
+                            # rest if the guest is not there.
+                            "host": addr.get(node) or host,
+                            "type": v.get("type") or "qemu"}
     return None
 
 
-def take_snapshot(vmid: str, node: str, reason: str) -> tuple[bool, str]:
-    """Snapshot a VM, using the WRITE key directly.
+def take_snapshot(vmid: str, target: Optional[dict], reason: str) -> tuple[bool, str]:
+    """Snapshot a guest, using the WRITE key directly.
 
     This is the bot acting, not the agent -- which is the whole point. The agent
     cannot be relied on to snapshot before changing something, because this
@@ -1743,36 +1787,78 @@ def take_snapshot(vmid: str, node: str, reason: str) -> tuple[bool, str]:
     handing over write access at all, so by the time the agent can change
     anything the rollback point already exists.
     """
+    target = target or {}
+    try:
+        num = int(str(vmid).strip())
+    except ValueError:
+        num = -1
+    if num < VMID_MIN:
+        # Caught here rather than by Proxmox, four ssh round trips later. The
+        # answer PVE gives ("vmid: invalid format") is about the number it was
+        # handed, and says nothing about where the number came from.
+        return False, (f"'{vmid}' is not a VM id -- Proxmox ids start at "
+                       f"{VMID_MIN}. Say which VM to snapshot, by id.")
+    # A container is not a VM: `qm` refuses one in wording that reads like the
+    # guest is missing entirely.
+    tool = "pct" if target.get("type") == "lxc" else "qm"
     name = f"ismart-{_dt.datetime.now():%m%d-%H%M}"
     desc = f"iSmart-LA before: {reason[:120]}"
-    for host in _snapshot_hosts(node):
+    hosts = _snapshot_hosts(target.get("host"))
+    if not hosts:
+        return False, ("no Proxmox host is registered here -- /addserver the "
+                       "cluster first, then snapshots can be taken.")
+    errors: list[str] = []
+    for host in hosts:
         try:
             proc = subprocess.run(
                 ["ssh", "-i", str(SSH_RW_KEY), "-o", "BatchMode=yes",
                  "-o", "ConnectTimeout=15", host,
-                 f"qm snapshot {int(vmid)} {name} --description {json.dumps(desc)}"],
+                 f"{tool} snapshot {num} {name} --description {json.dumps(desc)}"],
                 capture_output=True, text=True, timeout=180)
         except Exception as exc:
             logger.exception("snapshot call failed")
             return False, str(exc)[:300]
-        err = (proc.stderr or "").strip()
         if proc.returncode == 0:
-            register_snapshot({"vmid": vmid, "node": node or host,
+            register_snapshot({"vmid": vmid, "node": target.get("node") or host,
                                "snapname": name, "reason": reason[:200]})
             return True, name
+        err = (proc.stderr or "").strip() or f"exit {proc.returncode}"
         logger.warning("snapshot on %s failed: %s", host, err[-200:])
-    return False, err[-300:] if err else "no reachable node"
+        errors.append(f"{host}: {err.splitlines()[0][:120]}")
+    # Every host, not just the last one. The loop used to keep only the final
+    # error, and the final host was whichever came last in servers.json -- so a
+    # real failure on the real node was overwritten by whatever the last box
+    # happened to say. On this deployment that was a backup server answering
+    # "qm: command not found", which sent the diagnosis somewhere else entirely.
+    return False, "\n".join(errors[-4:])
 
 
-def _snapshot_hosts(node: Optional[str]) -> list[str]:
-    """Nodes to try. qm only works on the node actually hosting the VM, so the
-    named one goes first and the rest are a fallback for a stale lookup."""
+def _is_hypervisor(srv: dict) -> bool:
+    return srv.get("flavour") == "proxmox" or srv.get("kind") == "hypervisor"
+
+
+def _snapshot_hosts(host: Optional[str]) -> list[str]:
+    """Hypervisor addresses to try, the one hosting the guest first.
+
+    Hypervisors ONLY. A Proxmox Backup Server accepts the ssh, runs the
+    command and says `qm: command not found` -- it can never succeed, and
+    every attempt against it cost a round trip and a misleading error.
+
+    The rest of the cluster stays in the list behind it, because `qm` only
+    works on the node actually holding the guest and the lookup can be stale.
+    """
     hosts: list[str] = []
     for srv in _read_servers():
-        hosts += [srv["host"], *srv.get("cluster_hosts", [])]
-    if node:
-        hosts = [h for h in hosts if h == node] + [h for h in hosts if h != node]
-    return hosts or ([node] if node else [])
+        if not _is_hypervisor(srv):
+            continue
+        for h in [srv["host"], *srv.get("cluster_hosts", [])]:
+            if h and h not in hosts:
+                hosts.append(h)
+    if host:
+        hosts = [h for h in hosts if h == host] + [h for h in hosts if h != host]
+        if host not in hosts:
+            hosts.insert(0, host)
+    return hosts
 
 
 # The shipped templates carry these until somebody says what this deployment
@@ -10175,9 +10261,9 @@ async def _do_unlock_and_resume(update: Update, context: ContextTypes.DEFAULT_TY
     if pending.get("snapshot") and pending.get("vmid"):
         vmid = pending["vmid"]
         await query.edit_message_text(_t(lang, f"📸 Snapshotting VM {vmid}…", f"📸 Snapshot VM {vmid}…"))
-        node = await loop.run_in_executor(None, find_vm_node, vmid)
+        target = await loop.run_in_executor(None, find_vm_target, vmid)
         ok, detail = await loop.run_in_executor(
-            None, take_snapshot, vmid, node, pending["reason"])
+            None, take_snapshot, vmid, target, pending["reason"])
         if not ok:
             # A failed snapshot is a reason to stop, not a detail to note in
             # passing: proceeding would be making the change without the
@@ -10185,13 +10271,12 @@ async def _do_unlock_and_resume(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text(_t(lang,
                 f"❌ Snapshot failed, so I've left write mode <b>closed</b>:\n"
                 f"<pre>{_tg_escape(detail)}</pre>\n\n"
-                "Storage full, or too many snapshots already? Worth checking before "
-                "changing anything. Ask again to retry, or use /unlock to proceed "
-                "without one.",
+                "One line per node tried. Worth reading before changing anything. "
+                "Ask again to retry, or use /unlock to proceed without one.",
                 f"❌ Snapshot gagal, jadi write mode saya biarkan <b>tertutup</b>:\n"
                 f"<pre>{_tg_escape(detail)}</pre>\n\n"
-                "Storage penuh, atau sudah kebanyakan snapshot? Layak dicek dulu "
-                "sebelum mengubah apa pun. Minta lagi untuk coba ulang, atau pakai "
+                "Satu baris per node yang dicoba. Layak dibaca dulu sebelum "
+                "mengubah apa pun. Minta lagi untuk coba ulang, atau pakai "
                 "/unlock untuk lanjut tanpa snapshot.",
             ), parse_mode="HTML")
             return

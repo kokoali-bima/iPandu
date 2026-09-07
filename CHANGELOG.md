@@ -18,6 +18,42 @@
      that gap, but that is the maintainer's call, not something a contributing
      branch should decide by editing a check written one release ago. -->
 
+## Unreleased -- snapshots: the right guest, the right node, the right tool
+
+The operator's standing rule is "always snapshot before changing a VM". The bot
+offered to, and failed every time with:
+
+    bash: line 1: qm: command not found
+
+True, and beside the point. Four faults stacked, each hiding the next.
+
+**The id was never a VM id.** `_VMID_RE` accepted two digits, so "VM 20" -- a
+port, a size, a percentage -- became a snapshot target. Proxmox ids start at
+100, and it answered `vmid: invalid format` three times. The pattern now takes
+three to nine digits and `guess_vmid()` skips anything under 100; `take_snapshot()`
+checks before it opens a single connection, and says what is wrong with the
+number instead of relaying a message about a number the operator never chose.
+
+**Only the last error survived.** The loop rebound `err` each time round, so
+the final host's message was the whole diagnosis. Every host's first error line
+is reported now.
+
+**The final host was a backup server.** `_snapshot_hosts()` offered every
+registered machine. PBS accepts the ssh, runs the command and has no `qm` --
+it can never succeed, and it overwrote three copies of the real error with a
+shell message about a missing binary. Hypervisors only now.
+
+**The node hint was dead.** `find_vm_node()` returned a name ("node2") and
+`_snapshot_hosts()` compared it against addresses, so it never matched and
+snapshots started at whichever node came first in `servers.json`. Replaced by
+`find_vm_target()`, which returns node, address and type in one ssh -- the
+second `pvesh` call maps names to addresses.
+
+And a fifth, found on the way: a container needs `pct snapshot`, not `qm`. The
+type now comes from `/cluster/resources` rather than being assumed.
+
+41 checks in `dev/test_snapshot_target.py`.
+
 ## Unreleased -- two OAuth clients, because Google binds the grant to the type
 
 The previous entry said the manual path could reuse the operator's stored
