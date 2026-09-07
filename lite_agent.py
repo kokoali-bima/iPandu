@@ -6503,7 +6503,7 @@ async def _handle_gdrive_wizard_input(update: Update, context: ContextTypes.DEFA
             # straight there rather than starting a device flow it cannot
             # serve. The instructions now print the command carrying it.
             state["step"] = "await_gdrive_token"
-            await update.message.reply_text(
+            await _msg(update).reply_text(
                 _gdrive_connect_instructions(lang, state["name"]), parse_mode="HTML")
             return True
         await _gdrive_begin_device(update, context, lang, state["name"])
