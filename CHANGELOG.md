@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.2b.94 -- one word before the wait, only when there is one
+
+Conceived while planning a desktop companion and a physical voice speaker: a
+median turn takes 29 seconds, and standing in silence for that long is what
+makes the bot feel unresponsive, whatever eventually answers it.
+
+The first design considered fired an acknowledgment on every turn. Rejected on
+a sharp, correct objection with a concrete example: a canned "checking the
+server" line makes no sense as a reply to "bagaimana cuaca hari ini". The fix
+was not a better sentence -- it was a different trigger.
+
+`_send_delayed_ack` races a short delay (`ACK_DELAY_SECONDS`, default 5s)
+against the real answer. A fast reply -- small talk, a quick fact -- never
+produces a message at all: the background task is cancelled before its sleep
+ever returns. Only a turn that is genuinely still running past the delay gets
+one line, picked at random from a small pool, deliberately generic ("Oke,
+sebentar ya...") because at the moment it fires the model has not chosen a
+tool yet -- it cannot know whether this will turn out to be a weather question
+or a server restart. It is never edited or deleted afterward, the way a
+person's "one sec" stays in the conversation rather than vanishing once they
+actually answer.
+
+Same shape as the existing `_progress_heartbeat` (a cancellable background
+task, sleep then act, cancelled alongside it in the same `finally` block) --
+sitting one tier earlier, firing once rather than looping. The two notes now
+read as a natural sequence on a slow turn: an immediate "one sec" at ~5s, then
+"still working -- N min" starting at 90s if it is genuinely taking a while.
+
+18 dedicated checks, hardest on the property that matters most: a turn that
+finishes before the delay must never produce a message, sent after the real
+answer already landed.
+
+**1,149 checks across 52 suites.**
+
 ## v0.2b.93 -- a double-tapped button no longer crashes the handler
 
 Caught live, one minute before an unrelated /update restarted the process:

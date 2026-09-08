@@ -69,6 +69,7 @@ import json
 import logging
 import os
 import re
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -159,6 +160,43 @@ HEARTBEAT_EVERY_SECONDS = int(os.environ.get("HEARTBEAT_EVERY_SECONDS", "180"))
 # to extend it. The incident this comes from: a window opened for 10 minutes
 # while the turn it was opened for ran 18.
 WRITE_WARN_MINUTES = int(os.environ.get("WRITE_WARN_MINUTES", "5"))
+
+
+# Deliberately much shorter than HEARTBEAT_FIRST_SECONDS: that note exists
+# for a turn that is genuinely taking a while and says so explicitly ("still
+# working -- N min"). This one exists for the much more common case of a turn
+# that is merely not instant, and says nothing about duration at all -- it
+# only has to prove the bot is still there.
+ACK_DELAY_SECONDS = int(os.environ.get("ACK_DELAY_SECONDS", "5"))
+
+# Generic on purpose -- see the module note above this block. Never names a
+# task ("checking the server"), because at the moment this fires the model
+# has not chosen one yet.
+_ACK_PHRASES = (
+    ("Okay, one sec\u2026", "Oke, sebentar ya\u2026"),
+    ("Hmm, let me think\u2026", "Hmm, bentar, aku pikir dulu\u2026"),
+    ("Got it, working on it\u2026", "Siap, lagi dikerjakan\u2026"),
+    ("One moment\u2026", "Sebentar ya\u2026"),
+)
+
+
+async def _send_delayed_ack(update: Update, lang: str) -> None:
+    """One generic acknowledgment, sent ONCE, only if the turn is still
+    running after ACK_DELAY_SECONDS -- a fast reply never sees this at all,
+    because the task is cancelled before asyncio.sleep() below ever returns.
+
+    Never edited or deleted afterwards: it stays as an ordinary chat message,
+    the way a person saying "one sec" stays in the conversation rather than
+    vanishing once they actually answer."""
+    await asyncio.sleep(ACK_DELAY_SECONDS)
+    target = _msg(update)
+    if target is None:
+        return
+    en, id_ = random.choice(_ACK_PHRASES)
+    try:
+        await target.reply_text(_t(lang, en, id_))
+    except Exception:
+        pass  # an ack that fails to send is not worth failing the turn over
 
 
 async def _progress_heartbeat(context, chat_id: int, lang: str,
@@ -11077,6 +11115,7 @@ async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     beat = asyncio.create_task(_progress_heartbeat(
         context, update.effective_chat.id, lang, started,
         _effective_unlock_cap(update)))
+    ack = asyncio.create_task(_send_delayed_ack(update, lang))
     try:
         # run_combo shells out to agy/claude and blocks for minutes at a time
         # -- one live turn was measured at 4m35s. Called directly, as it was
@@ -11100,9 +11139,11 @@ async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             await target.reply_text(_t(lang, f"⚠️ Error: {exc}", f"⚠️ Error: {exc}"))
         return
     finally:
-        # Always: the heartbeat must not outlive the turn it reports on, on
-        # the error path or the success one.
+        # Always: neither background note may outlive the turn it reports on,
+        # on the error path or the success one. Cancelling ack after it has
+        # already sent its line is a no-op -- the task is simply done by then.
         beat.cancel()
+        ack.cancel()
 
     # Gemini's own session can die silently between turns (see
     # _agy_attempt_needs_reauth) -- the chain already failed over to Claude for
