@@ -18,6 +18,46 @@
      that gap, but that is the maintainer's call, not something a contributing
      branch should decide by editing a check written one release ago. -->
 
+## Unreleased -- /setbrief replaces the role instead of stacking it
+
+Found on the live ops deployment, in its own brief. `set_brief_role()` patched
+the opening line with `^(.*?assistant for )(.+?)(\.)`. That pattern stops at
+the FIRST full stop, and it has to: the template's prose continues on the same
+line ("...assistant for X. You are helpful, knowledgeable, and direct.").
+
+Which is fine while the role is what this command is documented for -- "a
+7-node Proxmox cluster". Give it a role containing full stops and only
+sentence one of the previous role is replaced; sentences two onward stay. Every
+edit leaves another layer. Three edits in, the real file's opening line held
+"Lingkup kerja" three times, "Untuk riset" three times, and the template's own
+"You are helpful," stranded in the middle of them. Nothing failed, nothing
+logged -- the model just paid for 19KB of duplicates on every conversation.
+
+The opening line is now REBUILT from the template rather than patched:
+
+    You are {a|an} {scope} assistant for {role}.{the template's own tail}
+
+Idempotent whatever the role contains, and it repairs an already-duplicated
+line on the next run rather than needing a separate command. The scope set by
+/setscope is preserved, the article follows it, and everything below line one
+-- hard boundaries, learned zone -- is untouched.
+
+The cost, stated because it is real: a hand-edited tail on that first line goes
+back to the template's wording.
+
+Two smaller things found while writing the tests:
+
+  The placeholder branch RETURNED EARLY, so a half-filled brief -- opening
+  sentence set, `## Environment:` still on the placeholder, or the reverse --
+  skipped the rebuild entirely. Both now run.
+
+  `_BRIEF_ENV_RE.sub()` took a replacement STRING, in which `` and `\g<0>`
+  are group references. A role containing a Windows path or a backslash would
+  have been corrupted or raised. It takes a function now, and a role full of
+  backreferences is asserted to survive literally.
+
+28 checks in `dev/test_setbrief_idempotent.py`. 1624/1626 across 63 suites.
+
 ## Unreleased -- merge v0.2b.91-93, where both sides had fixed the same two things
 
 The first merge in this fork where upstream and this branch had repaired the

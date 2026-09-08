@@ -2553,6 +2553,22 @@ def brief_configured() -> bool:
     return True
 
 
+def _brief_opening_tail(template: Path) -> Optional[str]:
+    """The template's opening line from after the role sentence onward.
+
+    The role sits mid-sentence in prose that continues ("...assistant for X.
+    You are helpful,"), so setting it means knowing where it ends. The
+    template knows: everything after the first ". " on its first line is
+    fixed text this project ships, and nothing an operator ever sets.
+    """
+    try:
+        first = template.read_text(encoding="utf-8").split("\n", 1)[0]
+    except OSError:
+        return None
+    head, sep, tail = first.partition(". ")
+    return (" " + tail) if sep and "assistant for" in head else None
+
+
 def set_brief_role(role: str) -> None:
     """Set (or change) what this deployment looks after, in both briefs.
 
@@ -2560,24 +2576,59 @@ def set_brief_role(role: str) -> None:
     "## Environment:" heading. Everything else in the protected zone -- the
     hard boundaries above all -- is passed through byte for byte, the same rule
     append_learned() follows for the half it does not own.
+
+    THE OPENING LINE IS REBUILT, not patched. It used to be patched, with
+    `^(.*?assistant for )(.+?)(\\.)` -- correct only while the role is what
+    this command is documented for, a short phrase like "a 7-node Proxmox
+    cluster". A role containing full stops broke it: the pattern stops at the
+    FIRST one, so sentences two onward of the previous role were never
+    replaced and simply stayed. Measured on a live deployment after three
+    edits, one brief's opening line held "Lingkup kerja" three times, "Untuk
+    riset" three times, and the template's own "You are helpful," wedged in
+    the middle of it -- 19KB of accumulated duplicates the model paid for
+    every conversation.
+
+    Rebuilding from the template is idempotent whatever the role contains, and
+    it repairs an already-duplicated line on the next run rather than needing
+    a separate command. The cost, stated because it is real: a hand-edited
+    tail on that first line goes back to the template's wording. The role, the
+    scope, the boundaries and everything below line one are untouched.
     """
     role = " ".join(role.split()).rstrip(".")
-    for path in (SYSTEM_PROMPT_FILE, GEMINI_PROMPT_FILE):
+    scope = brief_scope() or "infrastructure"
+    article = "an" if scope[:1].lower() in "aeiou" else "a"
+    for path, template in ((SYSTEM_PROMPT_FILE, BASE_DIR / "SOUL.md.template"),
+                           (GEMINI_PROMPT_FILE, BASE_DIR / "GEMINI.md.template")):
         if not path.exists():
             continue
         text = path.read_text(encoding="utf-8")
+        # Placeholder first, then the rebuild -- not one OR the other. A brief
+        # can be half-filled: the opening sentence set once and the Environment
+        # heading still carrying the placeholder, or the reverse. Taking the
+        # placeholder branch alone then left the opening line exactly as it
+        # was, which on an already-duplicated line meant the duplicates stayed.
         if BRIEF_PLACEHOLDER in text:
             text = text.replace(BRIEF_PLACEHOLDER, role)
+        tail = _brief_opening_tail(template)
+        first, sep, rest = text.partition("\n")
+        if tail is not None and "assistant for" in first:
+            text = f"You are {article} {scope} assistant for {role}.{tail}{sep}{rest}"
         else:
+            # No usable template beside the brief -- an install that dropped
+            # them, or a brief rewritten past recognition. Fall back to
+            # patching, which shipped before: worse, but never worse than
+            # leaving the role unset.
+            logger.warning("%s: no usable template tail, patching the role "
+                           "in place instead", path.name)
             text, n = _BRIEF_ROLE_RE.subn(
                 lambda m: f"{m.group(1)}{role}{m.group(3)}", text, count=1)
             if not n:
                 logger.warning(
-                    "%s has no recognisable role sentence -- only the Environment "
-                    "heading was updated", path.name)
-        text = _BRIEF_ENV_RE.sub(f"## Environment: {role}", text, count=1)
+                    "%s has no recognisable role sentence -- only the "
+                    "Environment heading was updated", path.name)
+        text = _BRIEF_ENV_RE.sub(lambda _m: f"## Environment: {role}", text, count=1)
         path.write_text(text, encoding="utf-8")
-    logger.warning("environment brief role set: %s", role)
+    logger.warning("environment brief role set (%d chars)", len(role))
 
 
 # Separate from BRIEF_PLACEHOLDER/set_brief_role above: that controls WHAT this
