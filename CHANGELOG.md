@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.2b.93 -- a double-tapped button no longer crashes the handler
+
+Caught live, one minute before an unrelated /update restarted the process:
+`cmd_update_button` crashed with an unhandled `telegram.error.BadRequest:
+Message is not modified` on the bscloud agent.
+
+A double-tap on the same inline button -- or Telegram redelivering the same
+callback, which looks identical from here -- ran the handler twice in close
+succession. The first call edited the message to "Updating -- confirm with
+your PIN."; the second tried to edit it to the exact same text again, and
+Telegram refuses an edit whose content and reply markup are byte-identical to
+what is already displayed. That refusal propagated as an unhandled error.
+
+v0.2b.88 already made this fault-tolerant for the ANSWER half of a button tap
+(`_safe_answer`, E020) -- the cosmetic ack that stops a button's spinner. The
+EDIT half, which is where the actual bug lived, was not. `_safe_edit` closes
+it the same way: it wraps `query.edit_message_text` and swallows only a
+`BadRequest` whose message says "not modified" -- a message or chat that is
+genuinely gone still raises, because that is a real problem and not a harmless
+double-tap. All 90 `query.edit_message_text(` call sites route through it,
+mechanically, the same way the 31 `query.answer(` sites did for E020.
+
+The reproduction that matters: `cmd_update_button` driven twice in a row with
+the same tap, exactly as it happened, asserting the second call no longer
+raises.
+
+Registered as E026. **1,131 checks across 51 suites.**
+
 ## v0.2b.92 -- registering what the model just built, without the wizard
 
 v0.2b.91 fixed the input side of a real incident: a subnet was treated as an

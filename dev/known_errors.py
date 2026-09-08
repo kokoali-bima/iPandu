@@ -466,4 +466,28 @@ ERRORS = [
         "guard": "test_server_autoregister.py",
         "release": "v0.2b.92",
     },
+    {
+        "id": "E026",
+        "date": "2026-09-08",
+        "area": "Telegram delivery",
+        "symptom": "cmd_update_button crashed with an unhandled "
+                   "telegram.error.BadRequest: Message is not modified, on the "
+                   "bscloud agent, one minute before an unrelated /update "
+                   "restarted the process.",
+        "cause": "A double-tap on the same inline button (or Telegram "
+                 "redelivering the same callback) ran the handler twice. The "
+                 "first call edited the message to the confirm-with-PIN text; "
+                 "the second tried to edit it to the exact same text again, "
+                 "and Telegram refuses an edit whose content and reply_markup "
+                 "are byte-identical to what is already displayed. _safe_answer "
+                 "(E020) had already made the ANSWER half of a button tap "
+                 "fault-tolerant; the EDIT half was not.",
+        "fix": "_safe_edit wraps query.edit_message_text and swallows only "
+               "BadRequest whose message says 'not modified' -- a message or "
+               "chat genuinely gone still raises, so a real problem is never "
+               "hidden. All 90 query.edit_message_text( call sites route "
+               "through it.",
+        "guard": "test_safe_edit.py",
+        "release": "v0.2b.93",
+    },
 ]
