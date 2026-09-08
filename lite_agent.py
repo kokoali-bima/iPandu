@@ -186,9 +186,12 @@ _ACK_PHRASES_QUESTION = (
     ("Let me look into that\u2026", "Aku cari tahu dulu ya\u2026"),
 )
 _ACK_PHRASES_GENERIC = (
-    ("Okay, one sec\u2026", "Oke, sebentar ya\u2026"),
-    ("One moment\u2026", "Sebentar ya\u2026"),
-    ("Got it, working on it\u2026", "Siap, lagi dikerjakan\u2026"),
+    ("Alright, give me a moment\u2026", "Oke, kasih aku waktu sebentar\u2026"),
+    ("Sure, hang tight\u2026", "Siap, tunggu bentar ya\u2026"),
+    ("Let me get that for you\u2026", "Aku ambilkan dulu ya\u2026"),
+    ("Just a sec\u2026", "Bentar ya\u2026"),
+    ("Coming right up\u2026", "Segera ya\u2026"),
+    ("Give me a beat\u2026", "Kasih waktu sebentar ya\u2026"),
 )
 
 # Checked in this order -- ACTION first, because a message can easily contain

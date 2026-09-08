@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.2b.96 -- wording pass on the neutral ack pool
+
+Wording only, chosen by the operator: the GENERIC ack pool (fires when a
+message matches neither the ACTION nor QUESTION shape) grew from three lines
+to six --
+
+*Alright, give me a moment... / Oke, kasih aku waktu sebentar...*
+*Sure, hang tight... / Siap, tunggu bentar ya...*
+*Let me get that for you... / Aku ambilkan dulu ya...*
+*Just a sec... / Bentar ya...*
+*Coming right up... / Segera ya...*
+*Give me a beat... / Kasih waktu sebentar ya...*
+
+ACTION and QUESTION pools are untouched. No logic changed -- the delay race
+and keyword categoriser from v0.2b.94/95 behave exactly as before; only the
+words picked for the neutral case are new.
+
+**1,161 checks across 52 suites.**
+
 ## v0.2b.95 -- the ack fits the question, without asking a model what it is
 
 v0.2b.94 raced a short delay against the real answer so a fast reply never
