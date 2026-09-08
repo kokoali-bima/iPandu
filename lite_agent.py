@@ -3768,6 +3768,16 @@ A plain ping or curl does NOT -- only ssh and `opn` do -- so a UIN address
 failing to ping means nothing about whether the host is up."""
 
 
+# The upload marker read `GDRIVE: <file> -> <folder/name>` here until 2026-09-08,
+# while extract_gdrive() has always required `file=` and `to=`. An arrow parsed
+# to nothing: no upload, no error, no log line. It survived because MOVE really
+# does take an arrow and the three markers read as a set, so the arrow spread
+# onto the one that rejects it. dev/test_gdrive_folder_picker.py now asserts
+# both directions -- the documented form parses, the old one does not.
+#
+# Keep additions here terse. test_capabilities_brief.py caps this at ~800
+# tokens because it is paid once per conversation on BOTH CLIs; explanation
+# belongs in comments like this one, which cost nothing at runtime.
 CAPABILITIES_BRIEF = """[What you can do here -- current as of this build:]
 
 You can produce and send real media, not just text. Say what you did; never
@@ -3803,9 +3813,14 @@ produced, the bot re-encodes anything oversized and says so.
 
 Drive markers, each on its own line, all gated behind the operator's PIN:
 
-  GDRIVE: <local file> -> <folder/name>   upload
-  GDRIVE_MOVE: <from> -> <to>             move
-  GDRIVE_DELETE: <path>                   delete
+  GDRIVE: file=<local file> | to=<folder/name>   upload
+  GDRIVE_MOVE: <from> -> <to>                    move
+  GDRIVE_DELETE: <path>                          delete
+
+Upload takes `file=` and `to=`, not an arrow -- an arrow there uploads
+nothing, silently. Where a destination folder is pinned, `to=` may name a
+subfolder of it that ALREADY EXISTS; one that does not is not created, and
+the file lands in the pinned folder. Never invent a folder to be tidy.
 
 ## Changing things on a server
 
@@ -5177,6 +5192,45 @@ def set_gdrive_pinned_dest(chat_id: str, entry: Optional[dict]) -> None:
     _write_gdrive_dest(items)
 
 
+GDRIVE_PINNED_MAX_DEPTH = 3
+
+
+def _gdrive_existing_subdir(account: str, base: str, to_raw: str) -> str:
+    """How much of the model's folder path already EXISTS under the pin.
+
+    Dropping every directory was the first rule, and it was too blunt. It
+    stopped the invention it was aimed at, but it also flattened a structure
+    the operator had built by hand -- backups and reports into one folder,
+    when there were two folders sitting right there for them.
+
+    So: a directory the model names is kept if it is really there, and
+    otherwise the walk stops. Nothing is ever created. An invented folder
+    therefore costs nothing except that the file lands in the pinned folder,
+    which is where it would have gone anyway.
+
+    Matching is case-insensitive and the name stored in Drive is what gets
+    used -- "backup opnsense" typed in a brief should reach "BACKUP OPNSENSE",
+    not create a second folder beside it that differs only in case. Google
+    Drive permits exactly that, which is how a tree ends up with two.
+    """
+    segs = [s for s in to_raw.strip("/").split("/")[:-1]
+            if s not in ("", ".", "..")]
+    kept: list[str] = []
+    for seg in segs[:GDRIVE_PINNED_MAX_DEPTH]:
+        parent = "/".join([p for p in (base, *kept) if p])
+        ok, names = gdrive_list_folders(account, parent)
+        if not ok:
+            # Listing failed -- say nothing about folders we could not see.
+            # Guessing "it probably exists" would create it.
+            logger.warning("pinned subfolder check failed under %r: %s", parent, names)
+            break
+        real = next((n for n in names if n.casefold() == seg.casefold()), None)
+        if real is None:
+            break
+        kept.append(real)
+    return "/".join(kept)
+
+
 def _gdrive_effective_default(chat_id: str, accounts: list[str]) -> Optional[str]:
     """This room's explicitly chosen account, or -- if it has never chosen and
     there is only ONE account connected -- that one, since there is no real
@@ -5334,7 +5388,10 @@ async def _send_to_gdrive(update: Update, context: ContextTypes.DEFAULT_TYPE, re
         if await loop.run_in_executor(None, gdrive_target, remote) != pinned.get("drive_id", ""):
             await loop.run_in_executor(
                 None, set_gdrive_target, remote, pinned.get("drive_id", ""))
-        upload_rel = req["to"].rstrip("/").rsplit("/", 1)[-1] or p.name
+        leaf = req["to"].rstrip("/").rsplit("/", 1)[-1] or p.name
+        sub = await loop.run_in_executor(
+            None, _gdrive_existing_subdir, remote, root, req["to"])
+        upload_rel = f"{sub}/{leaf}" if sub else leaf
         rel_path = f"{root}/{upload_rel}" if root else upload_rel
     else:
         root = None

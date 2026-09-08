@@ -3,18 +3,22 @@
 
 The failure this ends, reported from a live room: the same weekly report
 landed in "Laporan", then "laporan/september", then "Reports/2026". Nothing
-errored -- the folder after the arrow in `GDRIVE: <file> -> <folder/name>` is
-written by the MODEL, freshly each turn, and rclone creates whatever it is
-given. Three folders nobody chose, and the operator hunting for the file each
-time.
+errored -- the `to=` folder is written by the MODEL, freshly each turn, and
+rclone creates whatever it is given. Three folders nobody chose, and the
+operator hunting for the file each time.
 
-So a room can browse the real tree and pin a folder. Two consequences are the
-whole point, and both are asserted below:
+So a room browses the real tree and pins a folder. Under that pin:
 
-  * the model's directories are DROPPED, only its filename survives. Honouring
-    them would reopen the same hole one level down.
-  * the group-name subfolder is not added either -- somebody who browsed to a
-    folder and pressed "use this one" meant that folder, not a child of it.
+  * a directory the model names is kept only if it ALREADY EXISTS. Nothing is
+    ever created, so an invented folder costs nothing -- the file lands in the
+    pinned folder, where it would have gone anyway.
+  * the group-name subfolder is not added -- somebody who browsed to a folder
+    and pressed "use this one" meant that folder, not a child of it.
+
+The first rule was originally "drop every directory", which stopped the
+invention and also flattened a structure the operator had built by hand:
+"Wahyu-Work" holds "BACKUP OPNSENSE" and "Laporan", and backups and reports
+were landing together. Existence is the right test, not absence.
 
 And one that is easy to miss: `team_drive` is per-ACCOUNT rclone config, not
 per-room. A second room pinning a different shared drive on the same account
@@ -239,6 +243,107 @@ check("`off` clears the pin, so this is reversible from the chat",
 check("gdrive_dest.json is not committed -- it names folders in the "
       "operator's Drive",
       "gdrive_dest.json" in (SRC.parent / ".gitignore").read_text(encoding="utf-8"))
+
+
+# --- 6. a subfolder that already exists survives the pin -------------------
+# Dropping every directory stopped the invention it was aimed at and also
+# flattened a structure the operator had built by hand: on a real Drive,
+# "Wahyu-Work" holds "BACKUP OPNSENSE" and "Laporan", and backups and reports
+# were landing together. A named folder is kept when it is really there.
+TREE = {
+    "Wahyu-Work": ["BACKUP OPNSENSE", "Laporan"],
+    "Wahyu-Work/Laporan": ["2026"],
+    "Wahyu-Work/BACKUP OPNSENSE": [],
+    "Wahyu-Work/Laporan/2026": [],
+}
+
+def subdir(to_raw, base="Wahyu-Work", tree=None, fail_at=None):
+    asked = []
+    def fake(account, path):
+        asked.append(path)
+        if fail_at is not None and path == fail_at:
+            return False, "403 insufficient permissions"
+        return True, list((TREE if tree is None else tree).get(path, []))
+    with patch.object(mod, "gdrive_list_folders", side_effect=fake):
+        return mod._gdrive_existing_subdir("gdrive_3", base, to_raw), asked
+
+got, _ = subdir("BACKUP OPNSENSE/opnsense-0908.xml")
+check("a real subfolder of the pin is kept", got == "BACKUP OPNSENSE")
+got, _ = subdir("Laporan/juni.pdf")
+check("...so backups and reports can land in their own folders again",
+      got == "Laporan")
+got, _ = subdir("Laporan/2026/juni.pdf")
+check("...nested, as deep as it is real", got == "Laporan/2026")
+
+got, _ = subdir("backup opnsense/x.xml")
+check("matching ignores case -- a brief saying 'backup opnsense' must reach "
+      "'BACKUP OPNSENSE'", got == "BACKUP OPNSENSE")
+check("...and the name STORED IN DRIVE is what is used, or Drive would happily "
+      "hold two folders differing only in case",
+      got == "BACKUP OPNSENSE" and got != "backup opnsense")
+
+got, asked = subdir("Reports/2026/juni.pdf")
+check("a folder that does not exist is NOT created -- the file falls back to "
+      "the pinned folder itself", got == "")
+check("...and the walk stops at the first miss rather than probing deeper",
+      asked == ["Wahyu-Work"])
+
+got, _ = subdir("Laporan/Tidak-Ada/juni.pdf")
+check("a real folder followed by an invented one keeps only the real part",
+      got == "Laporan")
+
+got, _ = subdir("juni.pdf")
+check("a bare filename asks for no subfolder at all", got == "")
+got, _ = subdir("/Laporan/juni.pdf")
+check("a leading slash is not an escape, just noise", got == "Laporan")
+got, _ = subdir("../../etc/passwd")
+check("..-segments cannot climb out of the pinned folder", got == "")
+
+got, _ = subdir("Laporan/juni.pdf", base="", tree={"": ["Laporan"]})
+check("a pin at the drive root still resolves subfolders", got == "Laporan")
+
+got, asked = subdir("Laporan/juni.pdf", fail_at="Wahyu-Work")
+check("if the folder cannot be listed, nothing is assumed -- guessing 'it "
+      "probably exists' is how a folder gets created", got == "")
+
+deep = "/".join(f"L{i}" for i in range(6)) + "/x.pdf"
+tree = {"Wahyu-Work": ["L0"], **{f"Wahyu-Work/{'/'.join(f'L{j}' for j in range(i+1))}":
+                                 [f"L{i+1}"] for i in range(6)}}
+got, asked = subdir(deep, tree=tree)
+check("the walk is capped, so a pathological path cannot spend an rclone call "
+      "per segment", len(asked) <= mod.GDRIVE_PINNED_MAX_DEPTH)
+
+up = src.split("pinned = gdrive_pinned_dest(chat_id)")[1][:1600]
+check("the upload path consults it", "_gdrive_existing_subdir" in up)
+check("...and still keeps only the BASENAME as the file itself",
+      'rsplit("/", 1)[-1]' in up)
+
+# --- 7. the brief teaches the syntax the parser actually accepts -----------
+# It said `GDRIVE: <file> -> <folder/name>`. extract_gdrive() needs file= and
+# to=, so an arrow parsed to nothing: no upload, no error, no log line. MOVE
+# really does take an arrow, which is how the arrow spread onto the one
+# marker that rejects it.
+brief = mod.CAPABILITIES_BRIEF
+check("the brief shows the upload marker with file= and to=",
+      "GDRIVE: file=" in brief and "| to=" in brief)
+check("...and no longer with an arrow, which parses to nothing",
+      "GDRIVE: <local file> ->" not in brief)
+check("MOVE keeps its arrow, because that one really is an arrow",
+      "GDRIVE_MOVE: <from> -> <to>" in brief)
+_, parsed = mod.extract_gdrive("GDRIVE: file=/tmp/a.pdf | to=Laporan/a.pdf")
+check("the documented form is what the parser accepts",
+      parsed and parsed[0]["to"] == "Laporan/a.pdf")
+_, parsed_arrow = mod.extract_gdrive("GDRIVE: /tmp/a.pdf -> Laporan/a.pdf")
+check("...and the old documented form really did parse to nothing, which is "
+      "why this mattered", parsed_arrow == [])
+# Deliberately NOT asserting the brief names /gdrivefolder. The model cannot
+# run it -- pinning is the operator's act -- and test_capabilities_brief.py
+# caps this text at ~800 tokens because both CLIs pay for it every
+# conversation. What the model has to know is the RULE.
+check("the brief tells the model an existing subfolder is honoured under a pin",
+      "ALREADY EXISTS" in brief)
+check("...and that one which does not exist is not created for it",
+      "not created" in brief and "pinned folder" in brief)
 
 failed = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed")

@@ -18,6 +18,44 @@
      that gap, but that is the maintainer's call, not something a contributing
      branch should decide by editing a check written one release ago. -->
 
+## Unreleased -- a pinned folder keeps the folders you already made
+
+Pinning dropped every directory the model wrote. That stopped the invention it
+was aimed at and also flattened a structure the operator had built by hand: a
+real Drive folder holds "BACKUP OPNSENSE" and "Laporan", and backups and
+reports were landing together in the parent.
+
+Existence is the right test, not absence. A directory the model names is kept
+if it is really there, and the walk stops at the first miss. **Nothing is ever
+created**, so an invented folder now costs nothing -- the file lands in the
+pinned folder, which is where it would have gone anyway.
+
+Matching ignores case but uses the name stored in Drive. A brief saying
+"backup opnsense" has to reach "BACKUP OPNSENSE": Google Drive will happily
+hold two folders differing only in case, which is one more way to end up with
+a tree nobody meant. Capped at three levels, so a pathological path cannot
+spend an rclone call per segment, and a listing that fails assumes nothing --
+guessing "it probably exists" is how a folder gets created.
+
+### The brief documented a marker that parses to nothing
+
+`CAPABILITIES_BRIEF` taught `GDRIVE: <file> -> <folder/name>`. `extract_gdrive()`
+has always required `file=` and `to=`, so an arrow produced no upload, no
+error and no log line. Every other brief in the repo -- SOUL, GEMINI,
+bootstrap, README -- had it right.
+
+It survived because it is subtle: `GDRIVE_MOVE` really does take an arrow, and
+the three markers read as a set, so the arrow spread onto the one that rejects
+it. Both directions are asserted now: the documented form parses, the old one
+does not.
+
+Fixing it pushed the brief past the ~800-token cap `test_capabilities_brief.py`
+enforces -- paid once per conversation on BOTH CLIs. The ceiling stayed and the
+prose shrank; the archaeology moved into a comment above the constant, where it
+costs nothing at runtime.
+
+71 checks in `dev/test_gdrive_folder_picker.py`. 1498/1500 across 59 suites.
+
 ## Unreleased -- pin the Drive folder by browsing to it
 
 The folder after the arrow in `GDRIVE: <file> -> <folder/name>` is written by
