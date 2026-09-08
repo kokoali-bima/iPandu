@@ -18,6 +18,54 @@
      that gap, but that is the maintainer's call, not something a contributing
      branch should decide by editing a check written one release ago. -->
 
+## Unreleased -- merge v0.2b.91-93, where both sides had fixed the same two things
+
+The first merge in this fork where upstream and this branch had repaired the
+same code from opposite directions. Both sides are kept, because they are
+complementary rather than duplicate:
+
+  new-host card    ours remembers an address the room already dismissed;
+                   theirs skips addresses that are not machines at all --
+                   CIDR, last octet 0/255, introduced by gateway/DNS/subnet.
+  password guard   ours stops an ordinary question firing it;
+                   theirs stops the message being deleted without consent,
+                   and lets the turn run.
+
+Git auto-merged both functions without complaint, which is the part worth
+checking rather than trusting: ours turned out to live at the CALL SITE and in
+a shape test at the end of `mentions_password()`, so neither collided. Verified
+by behaviour against this fleet's real text, not only by the suites.
+
+Two textual conflicts, both "keep both": the `ssh_failure_hint` block and
+`find_vm_target` are ours, `_safe_edit` is theirs.
+
+### Three collisions the merge created
+
+* **Six direct `query.edit_message_text` calls** in the Drive folder picker.
+  It was written after upstream swept every callback edit into `_safe_edit`,
+  so `test_safe_edit.py` caught it immediately. Routed through the helper.
+* **`test_server_autoregister.py` matched the literal `CAPABILITIES_BRIEF`**
+  where this fork injects `capabilities_brief()` -- the function that appends
+  what the deployment actually has. Behaviour checked first (both models still
+  receive it, via `_run_claude_once` and `_build_agy_prompt`), then the
+  assertion widened to accept either spelling.
+* **The brief went over its ~800-token cap.** Upstream now spends 786 of it,
+  and the correct upload marker is inherently longer than the wrong one it
+  replaced. The ceiling stayed: the pinned-folder rule moved into
+  `GDRIVE_PIN_BRIEF`, appended only where a room has actually pinned one --
+  the conditional shape `OPNSENSE_BRIEF` already uses. 791/800 now, and a
+  deployment that never pins pays nothing for it.
+
+### And one upstream heuristic that does not speak this fleet's language
+
+`_NOT_A_HOST_BEFORE` allows nothing word-shaped between the keyword and the
+address. Right for "gateway 10.17.17.1"; wrong for "dns nya 8.8.8.8", because
+Indonesian attaches the possessive clitic -nya -- so the card offered to
+register a nameserver. That one clitic is now allowed, which can only ever
+suppress more; "server barunya 192.0.2.11" is still detected, and asserted.
+
+1587/1589 across 62 suites.
+
 ## Unreleased -- a pinned folder keeps the folders you already made
 
 Pinning dropped every directory the model wrote. That stopped the invention it
@@ -764,6 +812,107 @@ byte-identical results. **Verification on the Linux target is still pending** --
 this is a systemd path, and this dev box is not Linux, so "two deployments no
 longer restart each other" rests on source inspection plus a functional check
 of the path each one resolves, not on a real host.
+## v0.2b.93 -- a double-tapped button no longer crashes the handler
+
+Caught live, one minute before an unrelated /update restarted the process:
+`cmd_update_button` crashed with an unhandled `telegram.error.BadRequest:
+Message is not modified` on the bscloud agent.
+
+A double-tap on the same inline button -- or Telegram redelivering the same
+callback, which looks identical from here -- ran the handler twice in close
+succession. The first call edited the message to "Updating -- confirm with
+your PIN."; the second tried to edit it to the exact same text again, and
+Telegram refuses an edit whose content and reply markup are byte-identical to
+what is already displayed. That refusal propagated as an unhandled error.
+
+v0.2b.88 already made this fault-tolerant for the ANSWER half of a button tap
+(`_safe_answer`, E020) -- the cosmetic ack that stops a button's spinner. The
+EDIT half, which is where the actual bug lived, was not. `_safe_edit` closes
+it the same way: it wraps `query.edit_message_text` and swallows only a
+`BadRequest` whose message says "not modified" -- a message or chat that is
+genuinely gone still raises, because that is a real problem and not a harmless
+double-tap. All 90 `query.edit_message_text(` call sites route through it,
+mechanically, the same way the 31 `query.answer(` sites did for E020.
+
+The reproduction that matters: `cmd_update_button` driven twice in a row with
+the same tap, exactly as it happened, asserting the second call no longer
+raises.
+
+Registered as E026. **1,131 checks across 51 suites.**
+
+## v0.2b.92 -- registering what the model just built, without the wizard
+
+v0.2b.91 fixed the input side of a real incident: a subnet was treated as an
+unregistered host, and a password in a create-VM prompt was deleted before the
+task ever ran. Its own commit named what was left: post-execution
+auto-registration. This is that.
+
+The scenario: the operator had the bot clone two VMs on a Proxmox cluster,
+entirely through chat -- name, spec, network, credentials, all in one message,
+no /addserver. Once the VMs existed and were reachable, there was still no way
+into /servers except re-typing name, host, user and port into the manual
+wizard, one message at a time, for information the model had already reported
+a few lines above.
+
+The model now ends a reply with one line per host it just finished making
+reachable:
+
+    SERVER: name=<slug> | host=<ip> | user=<user> | port=<port>
+
+Each becomes a card: register it? Then a choice -- hypervisor or VM, exactly
+the two options asked for -- and then the same PIN /addserver has always
+required. Nothing is written until it checks out; tapping Register only asks
+what kind of machine it is, nothing else, because the model already reported
+everything the manual wizard would otherwise ask for one field at a time.
+
+The write itself is not a second implementation. `_register_server` is lifted
+out of the old `_finish_addserver` -- rebuild `~/.ssh/config`, save to
+`servers.json`, note it in the agent's brief, report back -- so the manual
+wizard and this new path share the exact same tail, and there is exactly one
+place that performs it.
+
+This works for either model without special-casing one of them. The
+instruction lives in `CAPABILITIES_BRIEF`, injected into both Claude's
+`--append-system-prompt` and agy's prompt on every fresh conversation -- the
+same mechanism that already carries every other capability to both CLIs on
+every `/update`, rather than SOUL.md/GEMINI.md, which are written once by
+install and never touched again. Kept to about 90 tokens so the brief as a
+whole stays under its own 800-token budget.
+
+Registered as E025. **1,120 checks across 50 suites.**
+
+## v0.2b.91 -- a subnet is not a server, and your message is not deleted unasked
+
+Two faults from one screenshot. Asking "carikan 2 ip dari subnet 10.10.59.0/24"
+got back "10.10.59.0 belum ada di inventaris -- daftarkan?", and a longer
+create-VM prompt both had its message deleted and got hijacked into the add-
+server wizard before it ran. Neither was what the operator asked for.
+
+**A subnet is not a host.** `unregistered_hosts_in` swept every IPv4 in the text
+and offered to register any it did not recognise -- including the network
+address of a subnet written in CIDR (the `.0` in `10.10.59.0/24`), a broadcast
+address, a gateway, and a DNS server. It now looks at what surrounds each
+address: an IP in CIDR form, one whose last octet is 0 or 255, or one introduced
+by the words gateway / DNS / subnet / netmask / nameserver is a parameter of a
+task, not a machine, and is passed over. A genuine unknown host -- "fix the app
+on 192.0.2.10" -- is still detected exactly as before.
+
+**Your message is not deleted without your say-so.** The credential guard used
+to call `delete()` the instant it saw a password, destroying the whole message
+-- and on a create-VM prompt that whole message was the task, with the VM's own
+credential a deliberate part of it. Worse, the turn was then dropped, so the
+work never happened. Now the bot warns and offers a **🗑 Delete the message**
+button; removal is your choice, and the message stays until you make it. The
+task runs -- the credential reaches the model because the task needs it -- and
+the PIN still gates the actual writes. Nothing is deleted automatically.
+
+This is the input side of a larger change the operator asked for. Still to come:
+after a task that creates machines finishes, an offer to register the new ones,
+and -- on choosing hypervisor or VM -- adding them to /servers directly, without
+walking the wizard.
+
+Registered as E023 and E024. **1,067 checks across 49 suites.**
+
 ## v0.2b.90 -- read the file, whatever it is
 
 Sending a PDF or an HTML file got "I can read images, but not this kind of

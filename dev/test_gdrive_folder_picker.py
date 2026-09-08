@@ -336,14 +336,35 @@ check("the documented form is what the parser accepts",
 _, parsed_arrow = mod.extract_gdrive("GDRIVE: /tmp/a.pdf -> Laporan/a.pdf")
 check("...and the old documented form really did parse to nothing, which is "
       "why this mattered", parsed_arrow == [])
-# Deliberately NOT asserting the brief names /gdrivefolder. The model cannot
-# run it -- pinning is the operator's act -- and test_capabilities_brief.py
-# caps this text at ~800 tokens because both CLIs pay for it every
-# conversation. What the model has to know is the RULE.
-check("the brief tells the model an existing subfolder is honoured under a pin",
-      "ALREADY EXISTS" in brief)
-check("...and that one which does not exist is not created for it",
-      "not created" in brief and "pinned folder" in brief)
+# The pin rule lives in its OWN brief, appended only where a room has actually
+# pinned a folder -- the same conditional shape as OPNSENSE_BRIEF. It is not in
+# the constant because upstream already spends 786 of the 800 tokens
+# test_capabilities_brief.py allows, and both CLIs pay for that text every
+# conversation. Telling a model about a rule that cannot apply on this box is
+# also how it starts offering things that are not there.
+pin = mod.GDRIVE_PIN_BRIEF
+check("the pin rule says an existing subfolder is honoured", "ALREADY EXISTS" in pin)
+check("...and that one which does not exist is NOT created for it",
+      "NOT created" in pin and "pinned folder" in pin)
+check("...and it is kept out of the always-on brief, which has no room for it",
+      "ALREADY EXISTS" not in brief)
+
+# Wide enough to reach past the docstring and the OPNsense branch; 900
+# stopped one line short of the block and reported it missing.
+src_fn = src.split("def capabilities_brief")[1][:1600]
+check("it is appended only when some room has pinned something",
+      "GDRIVE_PIN_BRIEF" in src_fn and "_read_gdrive_dest()" in src_fn)
+check("...and an unreadable file cannot take the brief down with it",
+      "except Exception" in src_fn)
+
+import types as _t2
+with patch.object(mod, "_read_gdrive_dest", return_value={}):
+    check("with nothing pinned anywhere, the rule is not injected at all",
+          "ALREADY EXISTS" not in mod.capabilities_brief())
+DEST.write_text(json.dumps({"-100": PIN}), encoding="utf-8")
+with patch.object(mod, "_read_gdrive_dest", return_value={"-100": PIN}):
+    check("...and it IS injected once somebody has pinned one",
+          "ALREADY EXISTS" in mod.capabilities_brief())
 
 failed = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed")

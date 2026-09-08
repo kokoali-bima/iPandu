@@ -739,7 +739,8 @@ _pin_sessions: dict[str, dict] = {}
 # back to owner-AND-private-DM, the strict default (see cmd_pin_key).
 PIN_ACTIONS_ALLOWED_IN_GROUP = frozenset({
     "new_pin_capture", "new_pin_confirm", "change_pin_start", "schedule_install",
-    "unlock", "unlock_and_resume", "addserver", "update", "rmboundary", "addmcp",
+    "unlock", "unlock_and_resume", "addserver", "auto_addserver", "update",
+    "rmboundary", "addmcp",
     "new_group_pin_capture", "new_group_pin_confirm", "change_group_pin_start",
     "gdrive_mutate",
 })
@@ -941,6 +942,12 @@ _SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
 # agreeing to, so losing them on restart is the correct behaviour.
 _pending_schedules: dict[str, dict] = {}
 
+# A proposal on its way to registration: token -> {name, host, user, port,
+# [kind], [flavour]}. In-memory like _pending_schedules and for the same
+# reason -- a proposal nobody confirmed should not survive to be confirmed
+# by accident after a restart.
+_pending_server_props: dict[str, dict] = {}
+
 
 def _read_schedules() -> list[dict]:
     if not SCHEDULES_FILE.exists():
@@ -1055,6 +1062,44 @@ def extract_schedules(text: str) -> tuple[str, list[dict]]:
         else:
             logger.warning("ignored malformed SCHEDULE: line: %s", raw[:120])
     return SCHEDULE_LINE_RE.sub("", text).strip(), proposals
+
+
+# SERVER: name=elastic-frozen-06 | host=10.10.59.53 | user=ubuntu | port=22
+SERVER_LINE_RE = re.compile(r"^\s*SERVER:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def parse_server_proposal(raw: str) -> Optional[dict]:
+    """Parse one SERVER: line -- a host the model just made reachable and is
+    proposing for /servers. None if malformed, exactly like
+    parse_schedule_proposal: a proposal we cannot fully understand is never
+    partially applied."""
+    fields: dict[str, str] = {}
+    for chunk in raw.split("|"):
+        if "=" not in chunk:
+            return None
+        k, _, v = chunk.partition("=")
+        fields[k.strip().lower()] = v.strip()
+    name, host, user = fields.get("name", ""), fields.get("host", ""), fields.get("user", "")
+    port_raw = fields.get("port", "")
+    if not (_NAME_RE.match(name) and _HOST_RE.match(host) and _USER_RE.match(user)
+            and port_raw.isdigit()):
+        return None
+    port = int(port_raw)
+    if not (1 <= port <= 65535):
+        return None
+    return {"name": name, "host": host, "user": user, "port": port}
+
+
+def extract_server_proposals(text: str) -> tuple[str, list[dict]]:
+    """Pull SERVER: lines out of a reply and strip them from what's shown."""
+    proposals = []
+    for raw in SERVER_LINE_RE.findall(text):
+        parsed = parse_server_proposal(raw)
+        if parsed:
+            proposals.append(parsed)
+        else:
+            logger.warning("ignored malformed SERVER: line: %s", raw[:120])
+    return SERVER_LINE_RE.sub("", text).strip(), proposals
 
 
 def install_schedule(item: dict, created_by: int) -> None:
@@ -1342,6 +1387,10 @@ HYPERVISOR_FLAVOURS = {
 }
 _HOST_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,30}$")
+# Shared with the SERVER: auto-registration parser below, so a username
+# typed into the manual wizard and one proposed by a model are held to
+# exactly the same rule.
+_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 
 def _read_servers() -> list[dict]:
@@ -1398,19 +1447,50 @@ def _valid_ipv4(text: str) -> bool:
     return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
 
 
-def unregistered_hosts_in(text: str) -> list[str]:
-    """IPv4 addresses in `text` that the inventory has never heard of.
+# The words that, right before an IP, mean it is not a host to register: a
+# gateway, a DNS/nameserver, a subnet or its mask. "gateway: 10.10.59.254" and
+# "dns: 10.10.59.77" are parameters of a task, not machines.
+# `\W*$` means nothing word-shaped may sit between the keyword and the address.
+# That is right for "gateway 10.17.17.1" and wrong for how half this fleet
+# actually writes: Indonesian attaches the possessive clitic -nya, so "dns nya
+# 8.8.8.8", "dnsnya" and "gateway-nya" all slipped through and offered to
+# register a nameserver. Allowing that one clitic only ever suppresses more,
+# never less, so a genuine unknown host is still detected exactly as before.
+_NOT_A_HOST_BEFORE = re.compile(
+    r"(?:gateway|gw|dns|nameserver|name\s*server|subnet|netmask|mask|network|"
+    r"broadcast)(?:\s*-?\s*nya)?\W*$", re.I)
 
-    Private-range and public alike -- what matters is whether we know it, not
-    where it lives. Loopback and 0.0.0.0 are dropped: they are never a machine
-    someone wants registered, and they show up in log excerpts constantly.
+
+def unregistered_hosts_in(text: str) -> list[str]:
+    """IPv4 addresses in `text` that the inventory has never heard of AND that
+    are plausibly a machine someone wants registered.
+
+    Not every IPv4 is a host. A subnet in CIDR form (10.10.59.0/24), a network
+    or broadcast address (last octet 0 or 255), and an IP introduced as a
+    gateway/DNS/subnet are excluded -- offering to 'register' any of those is
+    the bug this guard was tightened for. Loopback and the all-zero/all-ones
+    addresses stay excluded too; they fill log excerpts and are never a host.
     """
+    text = text or ""
     known = _known_hosts()
     out: list[str] = []
-    for cand in _IPV4_RE.findall(text or ""):
+    for m in _IPV4_RE.finditer(text):
+        cand = m.group(0)
         if not _valid_ipv4(cand):
             continue
         if cand.startswith("127.") or cand in ("0.0.0.0", "255.255.255.255"):
+            continue
+        # CIDR: an IP immediately followed by "/<digits>" is a subnet, not a host.
+        rest = text[m.end():m.end() + 4]
+        if rest[:1] == "/" and rest[1:2].isdigit():
+            continue
+        # Network / broadcast address of the common /24.
+        last = cand.rsplit(".", 1)[-1]
+        if last in ("0", "255"):
+            continue
+        # Introduced as a gateway / DNS / subnet by the words just before it.
+        before = text[max(0, m.start() - 24):m.start()]
+        if _NOT_A_HOST_BEFORE.search(before):
             continue
         low = cand.lower()
         if low not in known and low not in out:
@@ -1520,51 +1600,55 @@ def scrub_password(text: str) -> str:
     return _PASSWORD_RE.sub(_mask, text or "")
 
 
-async def warn_password_in_chat(update: Update, deleted: bool) -> None:
-    """Say why that was a bad idea, and what happens instead.
+async def warn_password_in_chat(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                orig_message_id: int) -> None:
+    """Flag a typed password and OFFER to remove it -- never delete unasked.
 
-    Deliberately not a scolding. The operator did the natural thing -- they were
-    handing over what the machine needs -- and the reason it is wrong is not
-    obvious unless someone says it once, plainly.
+    Deleting the message the instant a password appeared destroyed everything
+    else in it, without consent, and on a message that is itself the task that
+    was the wrong move twice over. So the message stays, a button removes it if
+    the operator wants, and the task still runs -- the PIN gates the writes.
     """
     lang = _chat_lang(update)
+    can_delete = await bot_can_delete_here(update, context)
     in_group = getattr(update.effective_chat, "type", "private") != "private"
-    if deleted:
-        gone = _t(lang, "I deleted your message.",
-                        "Pesan Anda sudah saya hapus.")
-    elif in_group:
-        # Name the exact right, and name what is NOT needed. "Make the bot an
-        # admin" reads like handing over the room; the only thing required here
-        # is deleting messages.
+
+    kb = None
+    if can_delete:
         gone = _t(lang,
-                  "I could not delete it — please delete it yourself. To let me "
-                  "clean these up here, make me an admin with <b>Delete "
-                  "messages</b> only; I do not need to add or remove members.",
-                  "Saya tidak bisa menghapusnya — tolong hapus sendiri. Supaya "
-                  "saya bisa membersihkannya di sini, jadikan saya admin dengan "
-                  "izin <b>Hapus pesan</b> saja; saya tidak butuh izin menambah "
-                  "atau mengeluarkan anggota.")
+                  "I did <b>not</b> delete it -- that is your call. Tap below to remove it.",
+                  "Saya <b>tidak</b> menghapusnya -- itu keputusan Anda. Tekan di bawah untuk menghapus.")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+            _t(lang, "🗑 Delete the message", "🗑 Hapus pesannya"),
+            callback_data=f"pwdel:{orig_message_id}")]])
+    elif in_group:
+        gone = _t(lang,
+                  "I cannot delete it here -- please delete it yourself. To let me "
+                  "clean these up, make me an admin with <b>Delete messages</b> only.",
+                  "Saya tidak bisa menghapusnya di sini -- tolong hapus sendiri. Supaya "
+                  "saya bisa membersihkannya, jadikan saya admin dengan izin <b>Hapus "
+                  "pesan</b> saja.")
     else:
-        gone = _t(lang, "I could not delete your message — please delete it yourself.",
-                        "Pesan Anda tidak bisa saya hapus — tolong hapus sendiri.")
+        gone = _t(lang, "Please delete it yourself.",
+                        "Tolong hapus sendiri.")
+
     await _msg(update).reply_text(
         _t(lang,
            f"⚠️ <b>That looked like a password.</b> {gone}\n\n"
            "A password typed here is stored in this chat's history, on your "
-           "device, on mine, and on Telegram's servers. Deleting it does not "
+           "device, on mine, and on Telegram's servers. Removing it does not "
            "undo that it was sent. Treat it as exposed and change it.\n\n"
-           "<b>You never need to send me one.</b> When a machine needs "
-           "credentials I ask for them in a wizard, on a keypad, where nothing "
-           "becomes a chat message.",
+           "<i>The task still runs</i> -- I only flag the credential. "
+           "You never need to send me one; when a machine needs it, a wizard "
+           "asks on a keypad.",
            f"⚠️ <b>Itu tadi terlihat seperti password.</b> {gone}\n\n"
            "Password yang diketik di sini tersimpan di riwayat chat ini, di HP "
            "Anda, di sisi saya, dan di server Telegram. Menghapusnya tidak "
-           "membatalkan fakta bahwa ia sempat terkirim. Anggap sudah bocor, "
-           "dan ganti.\n\n"
-           "<b>Anda tidak pernah perlu mengirimkannya ke saya.</b> Kalau sebuah "
-           "mesin butuh kredensial, saya yang akan meminta lewat wizard, di "
-           "keypad, sehingga tidak ada yang jadi pesan chat."),
-        parse_mode="HTML")
+           "membatalkan fakta bahwa ia sempat terkirim. Anggap sudah bocor, dan ganti.\n\n"
+           "<i>Tugasnya tetap dijalankan</i> -- saya hanya menandai kredensialnya. "
+           "Anda tidak pernah perlu mengirimkannya; kalau sebuah mesin butuh, "
+           "wizard yang meminta di keypad."),
+        parse_mode="HTML", reply_markup=kb)
 
 
 def parse_host_hints(text: str) -> dict:
@@ -3745,6 +3829,13 @@ def run_claude(prompt: str, session_id: Optional[str], session_name: str, model:
 # and arrives with /update like everything else. Injected only when a
 # conversation STARTS, exactly like the operator brief, so it costs its tokens
 # once rather than every turn.
+GDRIVE_PIN_BRIEF = """
+A destination folder is pinned in this deployment, so `to=` is read relative
+to it: name a subfolder that ALREADY EXISTS and the file goes there; name one
+that does not and it is NOT created -- the file lands in the pinned folder
+itself. Never invent a folder to be tidy. Put a report in the reports folder
+by naming the folder that is already there."""
+
 OPNSENSE_CONF_DIR = Path.home() / ".opnsense"
 
 OPNSENSE_BRIEF = """
@@ -3817,11 +3908,6 @@ Drive markers, each on its own line, all gated behind the operator's PIN:
   GDRIVE_MOVE: <from> -> <to>                    move
   GDRIVE_DELETE: <path>                          delete
 
-Upload takes `file=` and `to=`, not an arrow -- an arrow there uploads
-nothing, silently. Where a destination folder is pinned, `to=` may name a
-subfolder of it that ALREADY EXISTS; one that does not is not created, and
-the file lands in the pinned folder. Never invent a folder to be tidy.
-
 ## Changing things on a server
 
 By default your SSH key is READ-ONLY and a guard on the far side refuses
@@ -3848,6 +3934,14 @@ and it works the same every time:
 
 That is the whole answer. Improvising this is how it goes wrong: the wizard is
 deterministic, and anything you assemble instead is not.
+
+A NEW host you just made reachable (a cloned VM, a fresh box) skips
+/addserver -- propose it, one line per host, at the end of your reply:
+
+    SERVER: name=<slug> | host=<ip> | user=<user> | port=<port>
+
+They pick hypervisor or VM and confirm with a PIN. Only propose a verified
+host; do not repeat it.
 """
 
 
@@ -3865,6 +3959,14 @@ def capabilities_brief() -> str:
     if (OPNSENSE_CONF_DIR / "api.key").exists() and \
             (OPNSENSE_CONF_DIR / "base_url").exists():
         parts.append(OPNSENSE_BRIEF)
+    # Only where somebody has actually pinned a folder. Telling a model
+    # about a rule that cannot apply is how it starts offering things
+    # that are not there -- the failure this function exists to stop.
+    try:
+        if GDRIVE_DEST_FILE.exists() and _read_gdrive_dest():
+            parts.append(GDRIVE_PIN_BRIEF)
+    except Exception:
+        logger.debug("could not read pinned Drive destinations", exc_info=True)
     return "\n".join(parts)
 
 
@@ -4648,6 +4750,25 @@ async def _safe_answer(query, *args, **kwargs) -> None:
     except (TimedOut, NetworkError, BadRequest):
         # BadRequest covers 'query is too old', which is also nothing to do.
         logger.debug("callback answer() failed, continuing", exc_info=True)
+
+
+async def _safe_edit(query, text, **kwargs) -> None:
+    """Edit a callback's message, tolerating Telegram's "not modified" refusal.
+
+    Telegram rejects an edit whose text AND reply_markup are byte-identical to
+    what is already displayed -- BadRequest, "Message is not modified". A
+    double-tap on the same button (or a redelivered callback) can legitimately
+    produce that exact edit twice, and on 2026-09-08 it crashed cmd_update_button
+    as an unhandled error mid-/update. Only that specific, information-free
+    rejection is swallowed -- a message or chat that is genuinely gone is a real
+    problem and still raises."""
+    try:
+        await query.edit_message_text(text, **kwargs)
+    except BadRequest as exc:
+        if "not modified" not in str(exc).lower():
+            raise
+        logger.debug("edit_message_text was a no-op (unchanged content), "
+                    "continuing", exc_info=True)
 
 
 def _msg(update: Update):
@@ -6066,7 +6187,7 @@ async def cmd_start_lang_button(update: Update, context: ContextTypes.DEFAULT_TY
     prefs = _read_chat_languages()
     prefs[chat_id] = choice
     _write_chat_languages(prefs)
-    await query.edit_message_text(_wizard_text(choice), parse_mode="HTML",
+    await _safe_edit(query, _wizard_text(choice), parse_mode="HTML",
                                   reply_markup=_wizard_keyboard({}, choice))
 
 
@@ -6083,11 +6204,11 @@ async def cmd_setup_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await _safe_answer(query)
 
     if what == "close":
-        await query.edit_message_text(_t(lang, "Setup closed. Run /start any time.",
+        await _safe_edit(query, _t(lang, "Setup closed. Run /start any time.",
                                               "Setup ditutup. Jalankan /start kapan saja."))
         return
     if what == "menu":
-        await query.edit_message_text(_wizard_text(lang), parse_mode="HTML",
+        await _safe_edit(query, _wizard_text(lang), parse_mode="HTML",
                                       reply_markup=_wizard_keyboard({}, lang))
         return
     if what == "pin":
@@ -6102,7 +6223,7 @@ async def cmd_setup_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "step": "await_brief",
             "expires": _dt.datetime.now().timestamp() + WIZARD_TTL_SECONDS,
         }
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             "\U0001f5fa <b>What should this agent look after?</b>\n\n"
             "One plain sentence is enough -- it goes into the agent's brief as-is.\n\n"
             "e.g. <code>a 7-node Proxmox cluster</code>\n"
@@ -6173,12 +6294,12 @@ async def cmd_logout_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     _, _, which = query.data.partition(":")
 
     if which == "cancel":
-        await query.edit_message_text(_t(lang, "✖️ Cancelled.", "✖️ Dibatalkan."))
+        await _safe_edit(query, _t(lang, "✖️ Cancelled.", "✖️ Dibatalkan."))
         return
 
     if which == "agy":
         if logout_agy():
-            await query.edit_message_text(_t(lang,
+            await _safe_edit(query, _t(lang,
                 "✅ <b>Logged out of Gemini (Antigravity).</b>\n\n"
                 "Run /start and tap “Change Gemini (Antigravity)” to sign in "
                 "again -- it will now show a real sign-in URL instead of reporting "
@@ -6189,7 +6310,7 @@ async def cmd_logout_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 "“sudah sign-in” dari state lama.",
             ), parse_mode="HTML")
         else:
-            await query.edit_message_text(_t(lang,
+            await _safe_edit(query, _t(lang,
                 "ℹ️ Already signed out -- no stored Gemini credentials found.",
                 "ℹ️ Sudah logout -- tidak ada kredensial Gemini tersimpan.",
             ))
@@ -6198,26 +6319,26 @@ async def cmd_logout_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if which == "claude":
         ok, detail = await logout_claude()
         if ok:
-            await query.edit_message_text(_t(lang,
+            await _safe_edit(query, _t(lang,
                 "✅ <b>Logged out of Claude Code.</b>\n\n"
                 "Run /start and tap “Set up Claude Code” to sign in again.",
                 "✅ <b>Sudah logout dari Claude Code.</b>\n\n"
                 "Jalankan /start lalu tap “Atur Claude Code” untuk sign-in lagi.",
             ), parse_mode="HTML")
         elif detail:
-            await query.edit_message_text(_t(lang,
+            await _safe_edit(query, _t(lang,
                 f"⚠️ Logout failed:\n<pre>{_tg_escape(detail)}</pre>",
                 f"⚠️ Logout gagal:\n<pre>{_tg_escape(detail)}</pre>",
             ), parse_mode="HTML")
         else:
-            await query.edit_message_text(_t(lang,
+            await _safe_edit(query, _t(lang,
                 "ℹ️ Already signed out of Claude Code.",
                 "ℹ️ Sudah logout dari Claude Code.",
             ))
         return
 
     logger.error("unknown /logout choice: %s", which)
-    await query.edit_message_text(_t(lang, "⚠️ Internal error: unknown choice.",
+    await _safe_edit(query, _t(lang, "⚠️ Internal error: unknown choice.",
                                           "⚠️ Error internal: pilihan tidak dikenal."))
 
 
@@ -6225,7 +6346,7 @@ async def _begin_cli_login(update: Update, query, provider: str) -> None:
     """Kick off a provider's OAuth and show the URL."""
     lang = _chat_lang(update)
     if not tmux_available():
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             "⚠️ tmux isn't installed, and it's needed to drive the sign-in screen.\n"
             "Install it (<code>apt install tmux</code>) and try again.",
             "⚠️ tmux belum terpasang, padahal dibutuhkan untuk layar sign-in.\n"
@@ -6239,13 +6360,13 @@ async def _begin_cli_login(update: Update, query, provider: str) -> None:
         cmd, human = [CLAUDE_BIN, "auth", "login"], "Claude Code"
 
     handle = LoginHandle(session=f"ismart-login-{provider}", command=cmd)
-    await query.edit_message_text(_t(lang, f"⏳ Starting {human} sign-in…", f"⏳ Memulai sign-in {human}…"))
+    await _safe_edit(query, _t(lang, f"⏳ Starting {human} sign-in…", f"⏳ Memulai sign-in {human}…"))
     try:
         handle.start()
         url = await asyncio.get_running_loop().run_in_executor(None, handle.wait_for_url, 45)
     except Exception as exc:
         logger.exception("login start failed for %s", provider)
-        await query.edit_message_text(_t(lang, f"⚠️ Couldn't start the sign-in: {exc}",
+        await _safe_edit(query, _t(lang, f"⚠️ Couldn't start the sign-in: {exc}",
                                               f"⚠️ Gagal mulai sign-in: {exc}"))
         return
 
@@ -6254,11 +6375,11 @@ async def _begin_cli_login(update: Update, query, provider: str) -> None:
         handle.kill()
         if LoginHandle.already_done(screen):
             _mark_setup(provider, update.effective_user.id)
-            await query.edit_message_text(_t(lang,
+            await _safe_edit(query, _t(lang,
                 f"✅ {human} is already signed in.\n\nRun /start to see what's left.",
                 f"✅ {human} sudah sign-in.\n\nJalankan /start untuk lihat sisanya."))
             return
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             f"⚠️ Couldn't find a sign-in URL for {human}. Last output:\n\n"
             f"<pre>{_tg_escape(screen[-600:])}</pre>",
             f"⚠️ Tidak ketemu URL sign-in untuk {human}. Output terakhir:\n\n"
@@ -6287,7 +6408,7 @@ async def _begin_cli_login(update: Update, query, provider: str) -> None:
     # the clipboard -- and then the browser's own address bar, pasted by the
     # human -- is the untouched, single-encoded string agy actually printed.
     safe_url = _tg_escape(url)
-    await query.edit_message_text(_t(lang,
+    await _safe_edit(query, _t(lang,
         f"🔗 <b>Sign in to {human}</b>\n\n"
         f"1. Copy this link (tap it to copy) and open it in a browser:\n<code>{safe_url}</code>\n\n"
         "2. Approve it, copy the code you get back.\n"
@@ -6977,7 +7098,7 @@ async def cmd_update_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await _safe_answer(query)
     choice = query.data.split(":", 1)[1]
     if choice == "no":
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             "\u2716\ufe0f Left as is. Run /update whenever you want it.",
             "\u2716\ufe0f Dibiarkan. Jalankan /update kapan pun mau.",
         ))
@@ -6985,7 +7106,7 @@ async def cmd_update_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Replacing the code the bot runs is a bigger capability than /unlock, which
     # only widens an SSH credential for minutes. A tap from a signed-in device
     # is not enough on its own.
-    await query.edit_message_text(_t(lang,
+    await _safe_edit(query, _t(lang,
         "\U0001f4e6 Updating \u2014 confirm with your PIN.",
         "\U0001f4e6 Update \u2014 konfirmasi dengan PIN.",
     ))
@@ -7737,7 +7858,7 @@ async def cmd_help_lang_chosen(update: Update, context: ContextTypes.DEFAULT_TYP
     # An edit can only ever hold ONE message's worth of text -- the language
     # picker's own message becomes the first chunk, and the rest (if any)
     # follow as new messages, since a single message can't be split in place.
-    await query.edit_message_text(chunks[0], parse_mode="Markdown")
+    await _safe_edit(query, chunks[0], parse_mode="Markdown")
     for chunk in chunks[1:]:
         await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk, parse_mode="Markdown")
 
@@ -7992,7 +8113,7 @@ async def cmd_extend_write_button(update: Update, context: ContextTypes.DEFAULT_
     if not await _may_authorize_group_action(update, context):
         return
     if not write_mode_expires_at():
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             "🔒 The window already closed. /unlock to open a new one.",
             "🔒 Jendelanya sudah tertutup. /unlock untuk membuka yang baru."))
         return
@@ -8003,13 +8124,13 @@ async def cmd_extend_write_button(update: Update, context: ContextTypes.DEFAULT_
         asked = WRITE_MODE_DEFAULT_MINUTES
     room = write_mode_session_left(cap)
     if room < 1:
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             "⏳ This session has used its full window. /lock then /unlock for a new one.",
             "⏳ Sesi ini sudah memakai jatah penuhnya. /lock lalu /unlock untuk sesi baru."))
         return
     until = unlock_write_mode(min(asked, room), max_minutes=cap, extend=True)
     left = int((until - _dt.datetime.now().timestamp()) / 60) + 1
-    await query.edit_message_text(_t(lang,
+    await _safe_edit(query, _t(lang,
         f"🔓 Extended — about {left} minute(s) of write access left. No PIN needed: "
         f"same session.",
         f"🔓 Diperpanjang — sisa sekitar {left} menit akses tulis. Tanpa PIN: "
@@ -8552,7 +8673,7 @@ def _gdrive_picker_text(state: dict, lang: str) -> str:
 
 
 async def _gdrive_picker_show(query, state: dict, lang: str) -> None:
-    await query.edit_message_text(
+    await _safe_edit(query, 
         _gdrive_picker_text(state, lang), parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(_gdrive_picker_rows(state, lang)))
 
@@ -8623,7 +8744,7 @@ async def cmd_gdrivefolder_button(update: Update, context: ContextTypes.DEFAULT_
     state = _gdrive_picker.get(chat_id)
     if not state or state["expires"] < _dt.datetime.now().timestamp():
         _gdrive_picker.pop(chat_id, None)
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             "That picker expired. Run /gdrivefolder again.",
             "Picker itu kedaluwarsa. Jalankan /gdrivefolder lagi."))
         return
@@ -8632,7 +8753,7 @@ async def cmd_gdrivefolder_button(update: Update, context: ContextTypes.DEFAULT_
 
     if action == "cancel":
         _gdrive_picker.pop(chat_id, None)
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             "✖️ Nothing changed.", "✖️ Tidak ada yang diubah."))
         return
 
@@ -8640,7 +8761,7 @@ async def cmd_gdrivefolder_button(update: Update, context: ContextTypes.DEFAULT_
         ok, folders = await loop.run_in_executor(
             None, gdrive_list_folders, state["account"], path)
         if not ok:
-            await query.edit_message_text(_t(lang,
+            await _safe_edit(query, _t(lang,
                 f"⚠️ Could not list that folder: {_tg_escape(str(folders))}",
                 f"⚠️ Tidak bisa mendaftar folder itu: {_tg_escape(str(folders))}"),
                 parse_mode="HTML")
@@ -8659,7 +8780,7 @@ async def cmd_gdrivefolder_button(update: Update, context: ContextTypes.DEFAULT_
         ok, detail = await loop.run_in_executor(
             None, set_gdrive_target, state["account"], drive_id)
         if not ok:
-            await query.edit_message_text(_t(lang,
+            await _safe_edit(query, _t(lang,
                 f"⚠️ Could not switch to that drive: {_tg_escape(str(detail))}",
                 f"⚠️ Tidak bisa pindah ke drive itu: {_tg_escape(str(detail))}"),
                 parse_mode="HTML")
@@ -8688,7 +8809,7 @@ async def cmd_gdrivefolder_button(update: Update, context: ContextTypes.DEFAULT_
         logger.warning("gdrive destination pinned chat=%s account=%s drive=%s folder=%s",
                        chat_id, state["account"], state["drive_id"] or "mydrive",
                        state["path"])
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             f"✅ Uploads from this room now go to <b>{_tg_escape(where)}</b> → "
             f"<code>{_tg_escape(shown)}</code>, on account "
             f"<b>{_tg_escape(state['account'])}</b>.\n\n"
@@ -8778,10 +8899,10 @@ async def cmd_gdrive_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     action, remote = ("use", parts[1]) if len(parts) == 2 else (parts[1], parts[2])
 
     if action == "cancel":
-        return await query.edit_message_text(_t(lang, "Cancelled.", "Dibatalkan."))
+        return await _safe_edit(query, _t(lang, "Cancelled.", "Dibatalkan."))
 
     if remote not in _list_gdrive_accounts():
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             "That account isn't connected any more. Run /gdrive again.",
             "Akun itu sudah tidak terhubung lagi. Jalankan /gdrive lagi.",
         ))
@@ -8791,7 +8912,7 @@ async def cmd_gdrive_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # Confirm first, and say plainly what this does NOT do. "Remove the
         # account" reads just as naturally as "delete my files", and only one
         # of those readings is recoverable.
-        return await query.edit_message_text(_t(lang,
+        return await _safe_edit(query, _t(lang,
             f"Disconnect <b>{_tg_escape(remote)}</b>?\n\n"
             "This revokes the agent's access at Google and deletes the stored "
             "token from this server.\n\n"
@@ -8828,13 +8949,13 @@ async def cmd_gdrive_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 if ok else
                 _t(lang, f"Could not disconnect: {safe}",
                          f"Gagal memutus: {safe}"))
-        return await query.edit_message_text(head + tail, parse_mode="HTML")
+        return await _safe_edit(query, head + tail, parse_mode="HTML")
 
     chat_id = str(update.effective_chat.id)
     room_accounts = _read_gdrive_room_accounts()
     room_accounts[chat_id] = remote
     _write_gdrive_room_accounts(room_accounts)
-    await query.edit_message_text(_t(lang,
+    await _safe_edit(query, _t(lang,
         f"\U0001f4c1 This room now uploads to Drive account: <b>{_tg_escape(remote)}</b>",
         f"\U0001f4c1 Room ini sekarang upload ke akun Drive: <b>{_tg_escape(remote)}</b>",
     ), parse_mode="HTML")
@@ -9927,7 +10048,7 @@ async def request_pin(update: Update, action: str, payload: dict, prompt: str) -
 
 async def _redraw(query, header: str, token: str, filled: int, note: str = "") -> None:
     try:
-        await query.edit_message_text(
+        await _safe_edit(query, 
             f"{header}{note}\n{_pin_masked(filled)}",
             reply_markup=_pin_keyboard(token, filled),
         )
@@ -9977,13 +10098,13 @@ async def cmd_pin_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if session["expires"] < _dt.datetime.now().timestamp():
         _pin_sessions.pop(token, None)
         await _safe_answer(query, _t(lang, "Expired.", "Kedaluwarsa."), show_alert=True)
-        await query.edit_message_text(_t(lang, "🔢 PIN entry expired.", "🔢 PIN sudah kedaluwarsa."))
+        await _safe_edit(query, _t(lang, "🔢 PIN entry expired.", "🔢 PIN sudah kedaluwarsa."))
         return
 
     if key == "cancel":
         _pin_sessions.pop(token, None)
         await _safe_answer(query)
-        await query.edit_message_text(_t(lang, "✖️ Cancelled.", "✖️ Dibatalkan."))
+        await _safe_edit(query, _t(lang, "✖️ Cancelled.", "✖️ Dibatalkan."))
         return
     if key == "del":
         session["digits"] = session["digits"][:-1]
@@ -10014,7 +10135,7 @@ async def cmd_pin_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             _pin_sessions.pop(token, None)
             _pin_lockout_until = _dt.datetime.now().timestamp() + PIN_LOCKOUT_SECONDS
             logger.error("PIN lockout triggered after %d failed attempts", PIN_MAX_ATTEMPTS)
-            await query.edit_message_text(_t(lang,
+            await _safe_edit(query, _t(lang,
                 f"⛔ Wrong PIN {PIN_MAX_ATTEMPTS} times. Locked for "
                 f"{PIN_LOCKOUT_SECONDS // 60} minutes.",
                 f"⛔ PIN salah {PIN_MAX_ATTEMPTS} kali. Terkunci "
@@ -10050,7 +10171,7 @@ async def _pin_capture(update: Update, query, session: dict, token: str, entered
         _pin_sessions.pop(token, None)
         confirm_token = _new_pin_session(confirm_action, {"first": entered},
                                          update.effective_chat.id)
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             f"🔢 Enter the same {PIN_LENGTH} digits again to confirm:\n{_pin_masked(0)}",
             f"🔢 Masukkan lagi {PIN_LENGTH} digit yang sama untuk konfirmasi:\n{_pin_masked(0)}",
         ), reply_markup=_pin_keyboard(confirm_token, 0))
@@ -10058,7 +10179,7 @@ async def _pin_capture(update: Update, query, session: dict, token: str, entered
 
     _pin_sessions.pop(token, None)
     if entered != session["payload"]["first"]:
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             f"❌ The two entries didn't match. Run /{'setgrouppin' if is_group else 'setpin'} again.",
             f"❌ Dua isian tidak sama. Ulangi /{'setgrouppin' if is_group else 'setpin'}.",
         ))
@@ -10067,7 +10188,7 @@ async def _pin_capture(update: Update, query, session: dict, token: str, entered
     if is_group:
         chat = update.effective_chat
         set_group_pin(session["chat_id"], entered, update.effective_user.id)
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             f"✅ PIN set for <b>{_tg_escape(chat.title or session['chat_id'])}</b>. It now "
             "guards sensitive actions confirmed from this group specifically -- the "
             "owner's own PIN still works here too, as a master credential.\n\n"
@@ -10080,7 +10201,7 @@ async def _pin_capture(update: Update, query, session: dict, token: str, entered
         return
 
     set_pin(entered)
-    await query.edit_message_text(_t(lang,
+    await _safe_edit(query, _t(lang,
         "✅ PIN set. It now guards scheduled tasks and /unlock.\n"
         "It is stored only as a salted hash, and it is never typed into the chat.\n\n"
         "Run /start to see what's left.",
@@ -10111,7 +10232,7 @@ async def _pin_verified(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if action == "rmboundary":
         rule = payload["rule"]
         write_boundaries([x for x in read_boundaries() if x != rule])
-        await query.edit_message_text(_t(lang, f"🚧 Removed: {_tg_escape(rule)}",
+        await _safe_edit(query, _t(lang, f"🚧 Removed: {_tg_escape(rule)}",
                                               f"🚧 Dihapus: {_tg_escape(rule)}"), parse_mode="HTML")
         return
 
@@ -10119,6 +10240,13 @@ async def _pin_verified(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # payload carries a prefill when the operator got here from the
         # unknown-host card rather than by typing /addserver.
         await _begin_addserver(update, query, prefill=(payload or {}).get("prefill"))
+        return
+
+    if action == "auto_addserver":
+        # Everything is already known -- host/user/port from the model's own
+        # SERVER: line, kind (and flavour) from the buttons just tapped. The
+        # PIN was the last thing standing between this and the write.
+        await _register_server(update, query, payload["data"])
         return
 
     if action == "gdrive_mutate":
@@ -10140,12 +10268,12 @@ async def _pin_verified(update: Update, context: ContextTypes.DEFAULT_TYPE,
             for o, d in failed:
                 lines.append(f"• <code>{_tg_escape(o['path'])}</code> — "
                              f"{_tg_escape(_detail(lang, d))}")
-        await query.edit_message_text("\n".join(lines), parse_mode="HTML")
+        await _safe_edit(query, "\n".join(lines), parse_mode="HTML")
         return
 
     if action == "addmcp":
         register_mcp_server(payload["name"], payload["command"], payload["args"])
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             f"🔌 <b>{_tg_escape(payload['name'])}</b> registered.\n\n"
             "<i>Takes effect on the next new conversation -- /new applies it now.</i>",
             f"🔌 <b>{_tg_escape(payload['name'])}</b> terdaftar.\n\n"
@@ -10159,9 +10287,9 @@ async def _pin_verified(update: Update, context: ContextTypes.DEFAULT_TYPE,
             install_schedule(item, update.effective_user.id)
         except Exception as exc:
             logger.exception("schedule install failed")
-            await query.edit_message_text(_t(lang, f"⚠️ Could not install: {exc}", f"⚠️ Gagal pasang: {exc}"))
+            await _safe_edit(query, _t(lang, f"⚠️ Could not install: {exc}", f"⚠️ Gagal pasang: {exc}"))
             return
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             f"✅ Installed <b>{_tg_escape(item['name'])}</b> — runs "
             f"<code>{_tg_escape(item['when'])}</code>.\n"
             f"See /schedules, remove with /unschedule {_tg_escape(item['name'])}.",
@@ -10172,14 +10300,14 @@ async def _pin_verified(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     if action == "update":
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             "\U0001f4e6 Pulling the new version\u2026",
             "\U0001f4e6 Menarik versi baru\u2026",
         ))
         loop = asyncio.get_running_loop()
         ok, before, detail = await loop.run_in_executor(None, apply_update)
         if not ok:
-            await query.edit_message_text(_t(lang,
+            await _safe_edit(query, _t(lang,
                 f"\u26a0\ufe0f Update failed, nothing changed:\n<pre>{_tg_escape(detail)}</pre>",
                 f"\u26a0\ufe0f Update gagal, tidak ada yang berubah:\n<pre>{_tg_escape(detail)}</pre>",
             ), parse_mode="HTML")
@@ -10196,7 +10324,7 @@ async def _pin_verified(update: Update, context: ContextTypes.DEFAULT_TYPE,
             }))
         except OSError:
             logger.warning("could not write the post-update announcement", exc_info=True)
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             f"\u2705 Updated to <b>{_tg_escape(new_version)}</b>. Restarting\u2026",
             f"\u2705 Terupdate ke <b>{_tg_escape(new_version)}</b>. Restart\u2026",
         ), parse_mode="HTML")
@@ -10216,10 +10344,10 @@ async def _pin_verified(update: Update, context: ContextTypes.DEFAULT_TYPE,
             until = unlock_write_mode(payload["minutes"], max_minutes=_effective_unlock_cap(update))
         except OSError as exc:
             logger.exception("unlock failed")
-            await query.edit_message_text(_t(lang, f"⚠️ Could not unlock: {exc}", f"⚠️ Gagal buka: {exc}"))
+            await _safe_edit(query, _t(lang, f"⚠️ Could not unlock: {exc}", f"⚠️ Gagal buka: {exc}"))
             return
         left = int((until - _dt.datetime.now().timestamp()) / 60) + 1
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             f"🔓 Write mode open for {left} minute(s). It re-locks by itself; "
             "/lock closes it sooner. Hard boundaries still apply.",
             f"🔓 Write mode terbuka {left} menit. Terkunci sendiri lagi nanti; "
@@ -10228,7 +10356,7 @@ async def _pin_verified(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     logger.error("unknown PIN action: %s", action)
-    await query.edit_message_text(_t(lang, "⚠️ Internal error: unknown action.", "⚠️ Error internal: aksi tidak dikenal."))
+    await _safe_edit(query, _t(lang, "⚠️ Internal error: unknown action.", "⚠️ Error internal: aksi tidak dikenal."))
 
 
 async def _begin_new_pin(update: Update, query=None) -> None:
@@ -10254,7 +10382,7 @@ async def _begin_new_pin(update: Update, query=None) -> None:
     )
     kb = _pin_keyboard(token, 0)
     if query is not None:
-        await query.edit_message_text(text, reply_markup=kb)
+        await _safe_edit(query, text, reply_markup=kb)
     else:
         await update.effective_message.reply_text(text, reply_markup=kb)
 
@@ -10301,7 +10429,7 @@ async def _begin_new_group_pin(update: Update, query=None) -> None:
     )
     kb = _pin_keyboard(token, 0)
     if query is not None:
-        await query.edit_message_text(text, reply_markup=kb)
+        await _safe_edit(query, text, reply_markup=kb)
     else:
         await update.effective_message.reply_text(text, reply_markup=kb)
 
@@ -10419,6 +10547,128 @@ async def offer_schedules(update: Update, proposals: list[dict]) -> None:
         )
 
 
+async def offer_server_registration(update: Update, proposals: list[dict]) -> None:
+    """Ask before registering a host the model just made reachable.
+
+    Nothing is written here -- each proposal is only parked in memory until a
+    button is tapped, exactly like offer_schedules. If the bot restarts first,
+    the proposal is gone, which is right: a pending registration nobody
+    confirmed should not survive to be confirmed by accident later.
+    """
+    lang = _chat_lang(update)
+    for item in proposals:
+        token = hashlib.sha256(
+            f"{item['name']}{item['host']}{_dt.datetime.now().timestamp()}".encode()
+        ).hexdigest()[:16]
+        _pending_server_props[token] = dict(item)
+        await _msg(update).reply_text(
+            _t(lang, f"\U0001f5a5 <b>New host: {_tg_escape(item['name'])}</b>\n\n",
+                     f"\U0001f5a5 <b>Host baru: {_tg_escape(item['name'])}</b>\n\n")
+            + f"<code>{_tg_escape(item['user'])}@{_tg_escape(item['host'])}:{item['port']}</code>\n\n"
+            + _t(lang, "Register it in /servers?", "Daftarkan ke /servers?"),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(_t(lang, "\u2795 Register", "\u2795 Daftarkan"),
+                                     callback_data=f"autosrv:reg:{token}"),
+                InlineKeyboardButton(_t(lang, "\u2716\ufe0f Skip", "\u2716\ufe0f Lewati"),
+                                     callback_data=f"autosrv:skip:{token}"),
+            ]]),
+        )
+
+
+async def _confirm_autosrv(update: Update, query, data: dict) -> None:
+    """Kind (and flavour, if it needed one) is settled -- last stop is the PIN
+    every other write in this file already requires. The tap alone is not the
+    authorisation; the PIN says a person actually wants this."""
+    lang = _chat_lang(update)
+    await _safe_edit(query, _t(lang,
+        f"\U0001f5a5 Registering <b>{_tg_escape(data['name'])}</b> \u2014 confirm with your PIN.",
+        f"\U0001f5a5 Mendaftarkan <b>{_tg_escape(data['name'])}</b> \u2014 konfirmasi dengan PIN.",
+    ), parse_mode="HTML")
+    await request_pin(update, "auto_addserver", {"data": data}, _t(lang,
+        f"\U0001f5a5 Confirm registering <b>{_tg_escape(data['name'])}</b>.",
+        f"\U0001f5a5 Konfirmasi mendaftarkan <b>{_tg_escape(data['name'])}</b>.",
+    ))
+
+
+async def cmd_autosrv_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles every autosrv: tap: skip, register, then hypervisor/VM (and
+    flavour, for a hypervisor) -- the choices the operator asked to make by
+    button rather than by re-typing what the model already reported."""
+    query = update.callback_query
+    lang = _chat_lang(update)
+    parts = query.data.split(":")
+    action = parts[1]
+    # Same trust level as /addserver itself (_may_authorize_group_action's own
+    # docstring says so) -- an owner anywhere, or a registered group's own admin.
+    if not await _may_authorize_group_action(update, context):
+        await _safe_answer(query, _t(lang, "Bot owner, or a registered group's own admin.",
+                                   "Pemilik bot, atau admin dari grup yang sudah terdaftar."), show_alert=True)
+        return
+    await _safe_answer(query)
+
+    expired = _t(lang,
+        "That proposal has expired \u2014 ask again if you still want it.",
+        "Proposal itu sudah kedaluwarsa \u2014 minta lagi kalau masih mau.")
+
+    if action == "skip":
+        item = _pending_server_props.pop(parts[2], None)
+        name = _tg_escape(item["name"]) if item else "?"
+        await _safe_edit(query, _t(lang, f"\u2716\ufe0f Not registered: {name}",
+                                              f"\u2716\ufe0f Tidak didaftarkan: {name}"), parse_mode="HTML")
+        return
+
+    if action == "reg":
+        item = _pending_server_props.get(parts[2])
+        if not item:
+            await _safe_edit(query, expired)
+            return
+        await _safe_edit(query, 
+            _t(lang, f"\U0001f5a5 <b>{_tg_escape(item['name'])}</b> \u2014 what kind of machine is it?",
+                     f"\U0001f5a5 <b>{_tg_escape(item['name'])}</b> \u2014 jenis mesinnya apa?"),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(SERVER_KINDS["hypervisor"], callback_data=f"autosrv:kind:{parts[2]}:hypervisor"),
+                InlineKeyboardButton(SERVER_KINDS["vm"], callback_data=f"autosrv:kind:{parts[2]}:vm"),
+            ]]),
+        )
+        return
+
+    if action == "kind":
+        token, kind = parts[2], parts[3]
+        if kind == "hypervisor":
+            if token not in _pending_server_props:
+                await _safe_edit(query, expired)
+                return
+            await _safe_edit(query, 
+                _t(lang, "\U0001f5a5 Which hypervisor?", "\U0001f5a5 Hypervisor yang mana?"),
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(label, callback_data=f"autosrv:flavour:{token}:{key}")]
+                     for key, label in HYPERVISOR_FLAVOURS.items()]),
+            )
+            return
+        data = _pending_server_props.pop(token, None)
+        if not data:
+            await _safe_edit(query, expired)
+            return
+        data["kind"] = "vm"
+        await _confirm_autosrv(update, query, data)
+        return
+
+    if action == "flavour":
+        token, flavour = parts[2], parts[3]
+        data = _pending_server_props.pop(token, None)
+        if not data:
+            await _safe_edit(query, expired)
+            return
+        data["kind"] = "hypervisor"
+        data["flavour"] = flavour
+        await _confirm_autosrv(update, query, data)
+        return
+
+    logger.error("unknown autosrv action: %s", action)
+
+
 async def cmd_schedule_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     action, _, token = query.data.partition(":")
@@ -10430,19 +10680,19 @@ async def cmd_schedule_decision(update: Update, context: ContextTypes.DEFAULT_TY
     item = _pending_schedules.pop(token, None)
     if not item:
         await _safe_answer(query)
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             "That proposal has expired — ask again if you still want it.",
             "Proposal itu sudah kedaluwarsa — minta lagi kalau masih mau.",
         ))
         return
     if action == "sched_no":
         await _safe_answer(query)
-        await query.edit_message_text(_t(lang, f"✖️ Not installed: {item['name']}", f"✖️ Tidak dipasang: {item['name']}"))
+        await _safe_edit(query, _t(lang, f"✖️ Not installed: {item['name']}", f"✖️ Tidak dipasang: {item['name']}"))
         return
     # The tap alone is not the authorisation. It only says WHICH proposal; the
     # PIN says a person -- not just a logged-in device -- actually wants it.
     await _safe_answer(query)
-    await query.edit_message_text(_t(lang,
+    await _safe_edit(query, _t(lang,
         f"🗓 Installing <b>{_tg_escape(item['name'])}</b> — confirm with your PIN.",
         f"🗓 Memasang <b>{_tg_escape(item['name'])}</b> — konfirmasi dengan PIN.",
     ), parse_mode="HTML")
@@ -10665,6 +10915,28 @@ async def offer_register_host(update: Update, context: ContextTypes.DEFAULT_TYPE
         parse_mode="HTML", reply_markup=kb)
 
 
+async def cmd_pwdelete_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove the flagged message -- only when the operator taps to ask."""
+    query = update.callback_query
+    lang = _chat_lang(update)
+    await _safe_answer(query)
+    try:
+        mid = int(query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return
+    try:
+        await context.bot.delete_message(update.effective_chat.id, mid)
+        await _safe_edit(query, _t(lang,
+            "🗑 Deleted. Still treat that password as exposed and change it.",
+            "🗑 Terhapus. Tetap anggap password itu sudah bocor dan ganti."))
+    except Exception:
+        await _safe_edit(query, _t(lang,
+            "I could not delete it -- the 48-hour limit, or it is already gone. "
+            "Please remove it yourself.",
+            "Tidak bisa saya hapus -- batas 48 jam, atau sudah tidak ada. "
+            "Tolong hapus sendiri."))
+
+
 async def cmd_newhost_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Answer to the unknown-host card."""
     query = update.callback_query
@@ -10678,7 +10950,7 @@ async def cmd_newhost_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if pending:
             _dismissed_hosts.setdefault(chat_id, set()).add(pending["host"])
         _pending_newhost.pop(chat_id, None)
-        await query.edit_message_text(_t(lang, "✖️ Dropped.", "✖️ Dibatalkan."))
+        await _safe_edit(query, _t(lang, "✖️ Dropped.", "✖️ Dibatalkan."))
         return
 
     if action == "skip":
@@ -10694,7 +10966,7 @@ async def cmd_newhost_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # the card on every mention.
         _dismissed_hosts.setdefault(chat_id, set()).add(pending["host"])
         _pending_newhost.pop(chat_id, None)
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             "💬 Answering without registering. I still have no access there.",
             "💬 Dijawab tanpa didaftarkan. Saya tetap belum punya akses ke sana."))
         await _run_turn(update, context, pending["text"])
@@ -10702,7 +10974,7 @@ async def cmd_newhost_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if action == "reg":
         if not _is_owner(update) and not await _is_group_admin(update, context):
-            await query.edit_message_text(_t(lang,
+            await _safe_edit(query, _t(lang,
                 "🔒 Bot owner or a group admin only.",
                 "🔒 Cuma pemilik bot atau admin grup."))
             return
@@ -10760,7 +11032,7 @@ async def _begin_addserver(update: Update, query=None, prefill: Optional[dict] =
     text = _t(lang, "➕ <b>Add a server</b>\n\nWhat kind of machine is it?",
                     "➕ <b>Tambah server</b>\n\nJenis mesinnya apa?")
     if query is not None:
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        await _safe_edit(query, text, parse_mode="HTML", reply_markup=kb)
     else:
         await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=kb)
 
@@ -10777,13 +11049,13 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     if action == "cancel":
         _drop_server_wizard(chat_id)
-        await query.edit_message_text(_t(lang, "✖️ Cancelled. Nothing was saved.",
+        await _safe_edit(query, _t(lang, "✖️ Cancelled. Nothing was saved.",
                                               "✖️ Dibatalkan. Tidak ada yang disimpan."))
         return
 
     state = _server_wizard.get(chat_id)
     if not state:
-        await query.edit_message_text(_t(lang, "That form expired. Run /addserver again.",
+        await _safe_edit(query, _t(lang, "That form expired. Run /addserver again.",
                                               "Form itu sudah kedaluwarsa. Jalankan /addserver lagi."))
         return
     data = state["data"]
@@ -10793,7 +11065,7 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if value == "hypervisor":
             state["step"] = "flavour"
             _save_server_wizard()
-            await query.edit_message_text(
+            await _safe_edit(query, 
                 _t(lang, "➕ <b>Add a server</b>\n\nWhich hypervisor?",
                          "➕ <b>Tambah server</b>\n\nHypervisor yang mana?"), parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(
@@ -10805,14 +11077,14 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         data["flavour"] = value
         state["step"] = "name"
         _save_server_wizard()
-        await query.edit_message_text(_srv_prompt("name", lang), parse_mode="HTML")
+        await _safe_edit(query, _srv_prompt("name", lang), parse_mode="HTML")
         return
 
     if action == "flavour":
         data["flavour"] = value
         state["step"] = "name"
         _save_server_wizard()
-        await query.edit_message_text(_srv_prompt("name", lang), parse_mode="HTML")
+        await _safe_edit(query, _srv_prompt("name", lang), parse_mode="HTML")
         return
 
     if action == "cluster":
@@ -10822,7 +11094,7 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if data.get("flavour") != "proxmox":
             await _finish_addserver(update, query)
             return
-        await query.edit_message_text(
+        await _safe_edit(query, 
             _t(lang,
                "🔍 Scan the cluster now?\n\nRead-only — it just asks which nodes exist "
                "and how many guests are running. No changes, and it doesn't need write mode.",
@@ -10840,7 +11112,7 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if value == "no":
             await _finish_addserver(update, query)
             return
-        await query.edit_message_text(_t(lang, "🔍 Scanning… this can take a moment.",
+        await _safe_edit(query, _t(lang, "🔍 Scanning… this can take a moment.",
                                               "🔍 Scanning… bisa makan waktu sebentar."))
         loop = asyncio.get_running_loop()
         ok, detail, nodes = await loop.run_in_executor(
@@ -10860,7 +11132,7 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if data.get("flavour") == "proxmox":
             state["step"] = "cluster"
             _save_server_wizard()
-            await query.edit_message_text(_t(lang,
+            await _safe_edit(query, _t(lang,
                 "Added without protection. Does this same key reach every node?",
                 "Ditambahkan tanpa perlindungan. Apakah key yang sama menjangkau semua node?"),
                 reply_markup=InlineKeyboardMarkup([[
@@ -10875,7 +11147,7 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # Ask for the password only where the bot can clear it again. Finding
         # out afterwards that it cannot is finding out too late.
         if not await bot_can_delete_here(update, context):
-            await query.edit_message_text(_t(lang,
+            await _safe_edit(query, _t(lang,
                 "🔒 I can only take a password where I am able to delete your "
                 "message again. Here I cannot.\n\nEither continue in a private "
                 "chat with me, or make me an admin in this group with "
@@ -10888,7 +11160,7 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
         state["step"] = "password"
         _save_server_wizard()
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             f"🔐 Send the <b>{_tg_escape(data['user'])}</b> password for "
             f"<b>{_tg_escape(data['host'])}</b> as your next message.\n\n"
             "I delete it the moment it arrives, use it once to place my key, "
@@ -10905,7 +11177,7 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     if action == "test":
-        await query.edit_message_text(_t(lang, "🔌 Testing the connection…", "🔌 Menguji koneksi…"))
+        await _safe_edit(query, _t(lang, "🔌 Testing the connection…", "🔌 Menguji koneksi…"))
         loop = asyncio.get_running_loop()
         ok, detail = await loop.run_in_executor(
             None, test_server_ssh, data["host"], data["user"], data["port"],
@@ -10925,7 +11197,7 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                            "atau user/port-nya salah.")
                 tail_en += bootstrap_key_block("en")
                 tail_id += bootstrap_key_block("id")
-            await query.edit_message_text(
+            await _safe_edit(query,
                 _t(lang,
                    f"❌ Couldn't connect:\n<pre>{_tg_escape(detail)}</pre>\n\n{tail_en}",
                    f"❌ Gagal konek:\n<pre>{_tg_escape(detail)}</pre>\n\n{tail_id}",
@@ -10940,14 +11212,14 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # is treated as managed. The failure this whole feature exists to stop
         # was silent: everything looked configured, and nothing was.
         if _keys_configured() and not data.get("key"):
-            await query.edit_message_text(_t(lang,
+            await _safe_edit(query, _t(lang,
                 "🔒 Installing the read-only guard and verifying it really refuses writes\u2026",
                 "🔒 Memasang guard read-only dan memastikan tulis benar-benar ditolak\u2026"))
             gok, gdetail = await loop.run_in_executor(
                 None, secure_server, data["host"], data["user"], data["port"])
             data["guard"] = gdetail if gok else None
             if not gok:
-                await query.edit_message_text(
+                await _safe_edit(query, 
                     _t(lang,
                        f"\u26a0\ufe0f <b>Connected, but this host is NOT protected.</b>\n\n"
                        f"<pre>{_tg_escape(gdetail)}</pre>\n\n"
@@ -10974,7 +11246,7 @@ async def cmd_server_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if data.get("flavour") == "proxmox":
             state["step"] = "cluster"
             _save_server_wizard()
-            await query.edit_message_text(
+            await _safe_edit(query, 
                 _t(lang,
                    f"✅ Connected. <code>{_tg_escape(detail)}</code>\n\n"
                    "Does this same key reach <b>every node</b> in the cluster?",
@@ -11133,7 +11405,7 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
         return True
 
     if step == "user":
-        if not re.match(r"^[a-z_][a-z0-9_-]{0,31}$", text):
+        if not _USER_RE.match(text):
             await _msg(update).reply_text(_t(lang, "That doesn't look like a username. Try again.",
                                                   "Itu tidak seperti username. Coba lagi."))
             return True
@@ -11231,12 +11503,12 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
     return True
 
 
-async def _finish_addserver(update: Update, query, discovery: str = "") -> None:
-    chat_id = update.effective_chat.id
-    state = _drop_server_wizard(chat_id)
-    if not state:
-        return
-    data = state["data"]
+async def _register_server(update: Update, query, data: dict, discovery: str = "") -> None:
+    """The write itself: ~/.ssh/config, servers.json, the agent's brief, and a
+    report back. Shared between the manual /addserver wizard (_finish_addserver)
+    and auto-registration proposed by the model after a task (_confirm_autosrv)
+    -- both arrive here with the same fully-known `data`, just gathered a
+    different way, so there is exactly one place that performs the write."""
     items = [s for s in _read_servers() if s["name"] != data["name"]]
     items.append({
         **data,
@@ -11248,7 +11520,7 @@ async def _finish_addserver(update: Update, query, discovery: str = "") -> None:
         _rebuild_ssh_config(items)
     except Exception as exc:
         logger.exception("ssh config update failed")
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             f"⚠️ Saved nothing — couldn't update ~/.ssh/config: {exc}",
             f"⚠️ Tidak ada yang disimpan — gagal update ~/.ssh/config: {exc}",
         ))
@@ -11294,7 +11566,16 @@ async def _finish_addserver(update: Update, query, discovery: str = "") -> None:
             still_open = None
     if still_open:
         msg += harden_ssh_advice(lang)
-    await query.edit_message_text(msg, parse_mode="HTML")
+    await _safe_edit(query, msg, parse_mode="HTML")
+
+
+async def _finish_addserver(update: Update, query, discovery: str = "") -> None:
+    """The manual /addserver wizard's own last step: pop its state, then run
+    the write both paths share."""
+    state = _drop_server_wizard(update.effective_chat.id)
+    if not state:
+        return
+    await _register_server(update, query, state["data"], discovery)
 
 
 async def cmd_servers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -11588,19 +11869,19 @@ async def cmd_needwrite_button(update: Update, context: ContextTypes.DEFAULT_TYP
     if not pending or pending["expires"] < _dt.datetime.now().timestamp():
         _pending_write.pop(chat_id, None)
         await _safe_answer(query)
-        await query.edit_message_text(_t(lang, "That request expired. Just ask again.",
+        await _safe_edit(query, _t(lang, "That request expired. Just ask again.",
                                                "Permintaan itu sudah kedaluwarsa. Minta lagi saja."))
         return
     await _safe_answer(query)
 
     if choice == "cancel":
         _pending_write.pop(chat_id, None)
-        await query.edit_message_text(_t(lang, "🔒 Left locked. Nothing was changed.",
+        await _safe_edit(query, _t(lang, "🔒 Left locked. Nothing was changed.",
                                                "🔒 Tetap terkunci. Tidak ada yang diubah."))
         return
 
     pending["snapshot"] = (choice == "snap")
-    await query.edit_message_text(_t(lang,
+    await _safe_edit(query, _t(lang,
         "📸 Snapshot then unlock — confirm with your PIN." if pending["snapshot"]
         else "🔓 Unlock — confirm with your PIN.",
         "📸 Snapshot lalu unlock — konfirmasi dengan PIN." if pending["snapshot"]
@@ -11618,14 +11899,14 @@ async def _do_unlock_and_resume(update: Update, context: ContextTypes.DEFAULT_TY
     lang = _chat_lang(update)
     pending = _pending_write.pop(chat_id, None)
     if not pending:
-        await query.edit_message_text(_t(lang, "That request expired. Just ask again.",
+        await _safe_edit(query, _t(lang, "That request expired. Just ask again.",
                                                "Permintaan itu sudah kedaluwarsa. Minta lagi saja."))
         return
     loop = asyncio.get_running_loop()
 
     if pending.get("snapshot") and pending.get("vmid"):
         vmid = pending["vmid"]
-        await query.edit_message_text(_t(lang, f"📸 Snapshotting VM {vmid}…", f"📸 Snapshot VM {vmid}…"))
+        await _safe_edit(query, _t(lang, f"📸 Snapshotting VM {vmid}…", f"📸 Snapshot VM {vmid}…"))
         target = await loop.run_in_executor(None, find_vm_target, vmid)
         ok, detail = await loop.run_in_executor(
             None, take_snapshot, vmid, target, pending["reason"])
@@ -11633,7 +11914,7 @@ async def _do_unlock_and_resume(update: Update, context: ContextTypes.DEFAULT_TY
             # A failed snapshot is a reason to stop, not a detail to note in
             # passing: proceeding would be making the change without the
             # rollback point that was explicitly asked for.
-            await query.edit_message_text(_t(lang,
+            await _safe_edit(query, _t(lang,
                 f"❌ Snapshot failed, so I've left write mode <b>closed</b>:\n"
                 f"<pre>{_tg_escape(detail)}</pre>\n\n"
                 "One line per node tried. Worth reading before changing anything. "
@@ -11645,7 +11926,7 @@ async def _do_unlock_and_resume(update: Update, context: ContextTypes.DEFAULT_TY
                 "/unlock untuk lanjut tanpa snapshot.",
             ), parse_mode="HTML")
             return
-        await query.edit_message_text(_t(lang,
+        await _safe_edit(query, _t(lang,
             f"📸 Snapshot <code>{_tg_escape(detail)}</code> taken.",
             f"📸 Snapshot <code>{_tg_escape(detail)}</code> selesai.",
         ), parse_mode="HTML")
@@ -12031,20 +12312,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # every message, and unlike an instruction in a brief it cannot be
         # talked out of firing.
         if mentions_password(msg.text):
-            deleted = False
-            if await bot_can_delete_here(update, context):
-                try:
-                    await msg.delete()
-                    deleted = True
-                except Exception:
-                    # Rights can be right and the call still fail -- the 48-hour
-                    # limit, a race with the user deleting it first. Say so
-                    # rather than implying it is gone when it is not.
-                    logger.warning("could not delete a message containing a credential")
-            else:
-                logger.warning("no permission to delete a credential in chat=%s",
-                               update.effective_chat.id)
-            await warn_password_in_chat(update, deleted)
+            # No auto-delete: that destroyed the operator's whole message without
+            # consent. Warn and offer a button; the task itself still runs.
+            await warn_password_in_chat(update, context, msg.message_id)
 
         # From here on, work with the SCRUBBED text: the credential must not
         # reach _pending_newhost, the model, or anything downstream.
@@ -12055,10 +12325,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await offer_register_host(update, context, unknown[0],
                                       parse_host_hints(safe_text), safe_text)
             return
-        if mentions_password(msg.text):
-            # Warned, nothing else to register: do not hand the credential to a
-            # model as well.
-            return
+        # A password used to end the turn here. It no longer does: the operator
+        # confirmed the task should run (the credential is part of it), gated by
+        # the PIN when the model reaches a write.
 
     # An attached image, saved somewhere the model can open. A screenshot with
     # a caption -- "look at this, which one do I pick?" -- used to match no
@@ -12349,6 +12618,7 @@ async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     reply_text = result.get("result") or _t(lang, "(no response)", "(tidak ada respons)")
     reply_text, learned_facts = extract_learned(reply_text)
     reply_text, schedule_proposals = extract_schedules(reply_text)
+    reply_text, server_proposals = extract_server_proposals(reply_text)
     reply_text, snapshots_taken = extract_snapshots(reply_text)
     reply_text, needs_write = extract_needs_write(reply_text)
     reply_text, gdrive_ops = extract_gdrive_mutations(reply_text)
@@ -12396,6 +12666,13 @@ async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, te
                 logger.warning(
                     "ignored %d SCHEDULE: proposal(s) from an origin not allowed to manage schedules (chat=%s)",
                     len(schedule_proposals), chat_id,
+                )
+            if server_proposals and await _may_authorize_group_action(update, context):
+                await offer_server_registration(update, server_proposals)
+            elif server_proposals:
+                logger.warning(
+                    "ignored %d SERVER: proposal(s) from an origin not allowed to manage servers (chat=%s)",
+                    len(server_proposals), chat_id,
                 )
             if newly_learned:
                 # Visible, not silent: auto-writes the user can't see are how a
@@ -12698,6 +12975,7 @@ def main() -> None:
     app.add_handler(CommandHandler("rmmcp", cmd_rmmcp))
     app.add_handler(CommandHandler("mcpservers", cmd_mcpservers))
     app.add_handler(CommandHandler("gdrivestatus", cmd_gdrivestatus))
+    app.add_handler(CallbackQueryHandler(cmd_pwdelete_button, pattern="^pwdel:"))
     app.add_handler(CallbackQueryHandler(cmd_server_button, pattern="^srv:"))
     app.add_handler(CallbackQueryHandler(cmd_needwrite_button, pattern="^nw:"))
     app.add_handler(CallbackQueryHandler(cmd_newhost_button,
@@ -12710,6 +12988,7 @@ def main() -> None:
     app.add_handler(CommandHandler("unschedule", cmd_unschedule))
     app.add_handler(CommandHandler("adopt", cmd_adopt))
     app.add_handler(CallbackQueryHandler(cmd_schedule_decision, pattern="^sched_(ok|no):"))
+    app.add_handler(CallbackQueryHandler(cmd_autosrv_button, pattern="^autosrv:"))
     app.add_handler(CommandHandler("unlock", cmd_unlock))
     app.add_handler(CommandHandler("lock", cmd_lock))
     app.add_handler(CommandHandler("usemodel", cmd_usemodel))

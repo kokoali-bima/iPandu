@@ -399,4 +399,95 @@ ERRORS = [
         "guard": "test_document_input.py",
         "release": "v0.2b.90",
     },
+    {
+        "id": "E023",
+        "date": "2026-09-07",
+        "area": "Add server",
+        "symptom": "'tolong carikan 2 ip dari subnet 10.10.59.0/24' got "
+                   "'10.10.59.0 belum ada di inventaris -- daftarkan?'. A "
+                   "create-VM prompt did the same with its gateway and DNS, and "
+                   "that offer hijacked the whole task.",
+        "cause": "unregistered_hosts_in swept every IPv4 in the text and treated "
+                 "any it did not know as a host to register -- including a "
+                 "subnet's network address (the .0 in 10.10.59.0/24), a "
+                 "broadcast address, a gateway, and a DNS server.",
+        "fix": "It now walks matches with position and excludes CIDR notation "
+               "(IP followed by /digits), network/broadcast addresses (last "
+               "octet 0 or 255), and IPs introduced by gateway/DNS/subnet/"
+               "netmask/nameserver words just before them. A genuine unknown "
+               "host is still detected.",
+        "guard": "test_subnet_and_pw_consent.py",
+        "release": "v0.2b.91",
+    },
+    {
+        "id": "E024",
+        "date": "2026-09-07",
+        "area": "Credential safety",
+        "symptom": "A create-VM prompt that carried the VM's own credential had "
+                   "its ENTIRE message deleted the instant a password was seen, "
+                   "without asking -- and the task was then dropped and never "
+                   "ran.",
+        "cause": "The credential guard called msg.delete() automatically and "
+                 "returned, on the assumption a typed password is always an "
+                 "accident. On a message that IS the task, both were wrong: it "
+                 "destroyed the operator's whole prompt and refused to do the "
+                 "work.",
+        "fix": "No auto-delete. The warning now offers a '🗑 Delete the message' "
+               "button (cmd_pwdelete_button) so removal is the operator's "
+               "choice, and the turn is no longer dropped -- the task runs, its "
+               "credential reaching the model because the task needs it, with "
+               "the PIN still gating the writes.",
+        "guard": "test_subnet_and_pw_consent.py",
+        "release": "v0.2b.91",
+    },
+    {
+        "id": "E025",
+        "date": "2026-09-08",
+        "area": "Add server",
+        "symptom": "The operator had the bot clone two VMs on Proxmox, entirely "
+                   "through chat. Once they existed and were reachable, getting "
+                   "them into /servers still meant re-typing name/host/user/port "
+                   "into the manual wizard, one message at a time, for "
+                   "information the model already had and had just reported.",
+        "cause": "v0.2b.91 fixed the input side of this (a subnet is not a "
+                 "server, a password is not deleted unasked) and named what was "
+                 "left undone: post-execution auto-registration. There was no "
+                 "path from the model just finishing provisioning a host to "
+                 "/servers except the same wizard built for a human typing one "
+                 "field at a time.",
+        "fix": "The model ends a reply with one SERVER: name=|host=|user=|port= "
+               "line per finished host -- taught in CAPABILITIES_BRIEF, so it "
+               "reaches Claude and agy the same way every other capability "
+               "does, on every /update. Each proposal becomes a card, a "
+               "hypervisor/VM choice, and the same PIN /addserver has always "
+               "required -- no re-typing. The write itself (_register_server) "
+               "is shared with the manual wizard's own last step rather than "
+               "duplicated, lifted out of the old _finish_addserver.",
+        "guard": "test_server_autoregister.py",
+        "release": "v0.2b.92",
+    },
+    {
+        "id": "E026",
+        "date": "2026-09-08",
+        "area": "Telegram delivery",
+        "symptom": "cmd_update_button crashed with an unhandled "
+                   "telegram.error.BadRequest: Message is not modified, on the "
+                   "bscloud agent, one minute before an unrelated /update "
+                   "restarted the process.",
+        "cause": "A double-tap on the same inline button (or Telegram "
+                 "redelivering the same callback) ran the handler twice. The "
+                 "first call edited the message to the confirm-with-PIN text; "
+                 "the second tried to edit it to the exact same text again, "
+                 "and Telegram refuses an edit whose content and reply_markup "
+                 "are byte-identical to what is already displayed. _safe_answer "
+                 "(E020) had already made the ANSWER half of a button tap "
+                 "fault-tolerant; the EDIT half was not.",
+        "fix": "_safe_edit wraps query.edit_message_text and swallows only "
+               "BadRequest whose message says 'not modified' -- a message or "
+               "chat genuinely gone still raises, so a real problem is never "
+               "hidden. All 90 query.edit_message_text( call sites route "
+               "through it.",
+        "guard": "test_safe_edit.py",
+        "release": "v0.2b.93",
+    },
 ]
