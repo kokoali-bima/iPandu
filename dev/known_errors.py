@@ -440,4 +440,30 @@ ERRORS = [
         "guard": "test_subnet_and_pw_consent.py",
         "release": "v0.2b.91",
     },
+    {
+        "id": "E025",
+        "date": "2026-09-08",
+        "area": "Add server",
+        "symptom": "The operator had the bot clone two VMs on Proxmox, entirely "
+                   "through chat. Once they existed and were reachable, getting "
+                   "them into /servers still meant re-typing name/host/user/port "
+                   "into the manual wizard, one message at a time, for "
+                   "information the model already had and had just reported.",
+        "cause": "v0.2b.91 fixed the input side of this (a subnet is not a "
+                 "server, a password is not deleted unasked) and named what was "
+                 "left undone: post-execution auto-registration. There was no "
+                 "path from the model just finishing provisioning a host to "
+                 "/servers except the same wizard built for a human typing one "
+                 "field at a time.",
+        "fix": "The model ends a reply with one SERVER: name=|host=|user=|port= "
+               "line per finished host -- taught in CAPABILITIES_BRIEF, so it "
+               "reaches Claude and agy the same way every other capability "
+               "does, on every /update. Each proposal becomes a card, a "
+               "hypervisor/VM choice, and the same PIN /addserver has always "
+               "required -- no re-typing. The write itself (_register_server) "
+               "is shared with the manual wizard's own last step rather than "
+               "duplicated, lifted out of the old _finish_addserver.",
+        "guard": "test_server_autoregister.py",
+        "release": "v0.2b.92",
+    },
 ]

@@ -728,7 +728,8 @@ _pin_sessions: dict[str, dict] = {}
 # back to owner-AND-private-DM, the strict default (see cmd_pin_key).
 PIN_ACTIONS_ALLOWED_IN_GROUP = frozenset({
     "new_pin_capture", "new_pin_confirm", "change_pin_start", "schedule_install",
-    "unlock", "unlock_and_resume", "addserver", "update", "rmboundary", "addmcp",
+    "unlock", "unlock_and_resume", "addserver", "auto_addserver", "update",
+    "rmboundary", "addmcp",
     "new_group_pin_capture", "new_group_pin_confirm", "change_group_pin_start",
     "gdrive_mutate",
 })
@@ -930,6 +931,12 @@ _SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
 # agreeing to, so losing them on restart is the correct behaviour.
 _pending_schedules: dict[str, dict] = {}
 
+# A proposal on its way to registration: token -> {name, host, user, port,
+# [kind], [flavour]}. In-memory like _pending_schedules and for the same
+# reason -- a proposal nobody confirmed should not survive to be confirmed
+# by accident after a restart.
+_pending_server_props: dict[str, dict] = {}
+
 
 def _read_schedules() -> list[dict]:
     if not SCHEDULES_FILE.exists():
@@ -1044,6 +1051,44 @@ def extract_schedules(text: str) -> tuple[str, list[dict]]:
         else:
             logger.warning("ignored malformed SCHEDULE: line: %s", raw[:120])
     return SCHEDULE_LINE_RE.sub("", text).strip(), proposals
+
+
+# SERVER: name=elastic-frozen-06 | host=10.10.59.53 | user=ubuntu | port=22
+SERVER_LINE_RE = re.compile(r"^\s*SERVER:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def parse_server_proposal(raw: str) -> Optional[dict]:
+    """Parse one SERVER: line -- a host the model just made reachable and is
+    proposing for /servers. None if malformed, exactly like
+    parse_schedule_proposal: a proposal we cannot fully understand is never
+    partially applied."""
+    fields: dict[str, str] = {}
+    for chunk in raw.split("|"):
+        if "=" not in chunk:
+            return None
+        k, _, v = chunk.partition("=")
+        fields[k.strip().lower()] = v.strip()
+    name, host, user = fields.get("name", ""), fields.get("host", ""), fields.get("user", "")
+    port_raw = fields.get("port", "")
+    if not (_NAME_RE.match(name) and _HOST_RE.match(host) and _USER_RE.match(user)
+            and port_raw.isdigit()):
+        return None
+    port = int(port_raw)
+    if not (1 <= port <= 65535):
+        return None
+    return {"name": name, "host": host, "user": user, "port": port}
+
+
+def extract_server_proposals(text: str) -> tuple[str, list[dict]]:
+    """Pull SERVER: lines out of a reply and strip them from what's shown."""
+    proposals = []
+    for raw in SERVER_LINE_RE.findall(text):
+        parsed = parse_server_proposal(raw)
+        if parsed:
+            proposals.append(parsed)
+        else:
+            logger.warning("ignored malformed SERVER: line: %s", raw[:120])
+    return SERVER_LINE_RE.sub("", text).strip(), proposals
 
 
 def install_schedule(item: dict, created_by: int) -> None:
@@ -1331,6 +1376,10 @@ HYPERVISOR_FLAVOURS = {
 }
 _HOST_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,30}$")
+# Shared with the SERVER: auto-registration parser below, so a username
+# typed into the manual wizard and one proposed by a model are held to
+# exactly the same rule.
+_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 
 def _read_servers() -> list[dict]:
@@ -3461,6 +3510,14 @@ and it works the same every time:
 
 That is the whole answer. Improvising this is how it goes wrong: the wizard is
 deterministic, and anything you assemble instead is not.
+
+A NEW host you just made reachable (a cloned VM, a fresh box) skips
+/addserver -- propose it, one line per host, at the end of your reply:
+
+    SERVER: name=<slug> | host=<ip> | user=<user> | port=<port>
+
+They pick hypervisor or VM and confirm with a PIN. Only propose a verified
+host; do not repeat it.
 """
 
 
@@ -8786,6 +8843,13 @@ async def _pin_verified(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await _begin_addserver(update, query, prefill=(payload or {}).get("prefill"))
         return
 
+    if action == "auto_addserver":
+        # Everything is already known -- host/user/port from the model's own
+        # SERVER: line, kind (and flavour) from the buttons just tapped. The
+        # PIN was the last thing standing between this and the write.
+        await _register_server(update, query, payload["data"])
+        return
+
     if action == "gdrive_mutate":
         loop = asyncio.get_running_loop()
         remote = _gdrive_effective_default(str(update.effective_chat.id),
@@ -9082,6 +9146,128 @@ async def offer_schedules(update: Update, proposals: list[dict]) -> None:
                 InlineKeyboardButton(_t(lang, "✖️ Cancel", "✖️ Batal"), callback_data=f"sched_no:{token}"),
             ]]),
         )
+
+
+async def offer_server_registration(update: Update, proposals: list[dict]) -> None:
+    """Ask before registering a host the model just made reachable.
+
+    Nothing is written here -- each proposal is only parked in memory until a
+    button is tapped, exactly like offer_schedules. If the bot restarts first,
+    the proposal is gone, which is right: a pending registration nobody
+    confirmed should not survive to be confirmed by accident later.
+    """
+    lang = _chat_lang(update)
+    for item in proposals:
+        token = hashlib.sha256(
+            f"{item['name']}{item['host']}{_dt.datetime.now().timestamp()}".encode()
+        ).hexdigest()[:16]
+        _pending_server_props[token] = dict(item)
+        await _msg(update).reply_text(
+            _t(lang, f"\U0001f5a5 <b>New host: {_tg_escape(item['name'])}</b>\n\n",
+                     f"\U0001f5a5 <b>Host baru: {_tg_escape(item['name'])}</b>\n\n")
+            + f"<code>{_tg_escape(item['user'])}@{_tg_escape(item['host'])}:{item['port']}</code>\n\n"
+            + _t(lang, "Register it in /servers?", "Daftarkan ke /servers?"),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(_t(lang, "\u2795 Register", "\u2795 Daftarkan"),
+                                     callback_data=f"autosrv:reg:{token}"),
+                InlineKeyboardButton(_t(lang, "\u2716\ufe0f Skip", "\u2716\ufe0f Lewati"),
+                                     callback_data=f"autosrv:skip:{token}"),
+            ]]),
+        )
+
+
+async def _confirm_autosrv(update: Update, query, data: dict) -> None:
+    """Kind (and flavour, if it needed one) is settled -- last stop is the PIN
+    every other write in this file already requires. The tap alone is not the
+    authorisation; the PIN says a person actually wants this."""
+    lang = _chat_lang(update)
+    await query.edit_message_text(_t(lang,
+        f"\U0001f5a5 Registering <b>{_tg_escape(data['name'])}</b> \u2014 confirm with your PIN.",
+        f"\U0001f5a5 Mendaftarkan <b>{_tg_escape(data['name'])}</b> \u2014 konfirmasi dengan PIN.",
+    ), parse_mode="HTML")
+    await request_pin(update, "auto_addserver", {"data": data}, _t(lang,
+        f"\U0001f5a5 Confirm registering <b>{_tg_escape(data['name'])}</b>.",
+        f"\U0001f5a5 Konfirmasi mendaftarkan <b>{_tg_escape(data['name'])}</b>.",
+    ))
+
+
+async def cmd_autosrv_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles every autosrv: tap: skip, register, then hypervisor/VM (and
+    flavour, for a hypervisor) -- the choices the operator asked to make by
+    button rather than by re-typing what the model already reported."""
+    query = update.callback_query
+    lang = _chat_lang(update)
+    parts = query.data.split(":")
+    action = parts[1]
+    # Same trust level as /addserver itself (_may_authorize_group_action's own
+    # docstring says so) -- an owner anywhere, or a registered group's own admin.
+    if not await _may_authorize_group_action(update, context):
+        await _safe_answer(query, _t(lang, "Bot owner, or a registered group's own admin.",
+                                   "Pemilik bot, atau admin dari grup yang sudah terdaftar."), show_alert=True)
+        return
+    await _safe_answer(query)
+
+    expired = _t(lang,
+        "That proposal has expired \u2014 ask again if you still want it.",
+        "Proposal itu sudah kedaluwarsa \u2014 minta lagi kalau masih mau.")
+
+    if action == "skip":
+        item = _pending_server_props.pop(parts[2], None)
+        name = _tg_escape(item["name"]) if item else "?"
+        await query.edit_message_text(_t(lang, f"\u2716\ufe0f Not registered: {name}",
+                                              f"\u2716\ufe0f Tidak didaftarkan: {name}"), parse_mode="HTML")
+        return
+
+    if action == "reg":
+        item = _pending_server_props.get(parts[2])
+        if not item:
+            await query.edit_message_text(expired)
+            return
+        await query.edit_message_text(
+            _t(lang, f"\U0001f5a5 <b>{_tg_escape(item['name'])}</b> \u2014 what kind of machine is it?",
+                     f"\U0001f5a5 <b>{_tg_escape(item['name'])}</b> \u2014 jenis mesinnya apa?"),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(SERVER_KINDS["hypervisor"], callback_data=f"autosrv:kind:{parts[2]}:hypervisor"),
+                InlineKeyboardButton(SERVER_KINDS["vm"], callback_data=f"autosrv:kind:{parts[2]}:vm"),
+            ]]),
+        )
+        return
+
+    if action == "kind":
+        token, kind = parts[2], parts[3]
+        if kind == "hypervisor":
+            if token not in _pending_server_props:
+                await query.edit_message_text(expired)
+                return
+            await query.edit_message_text(
+                _t(lang, "\U0001f5a5 Which hypervisor?", "\U0001f5a5 Hypervisor yang mana?"),
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(label, callback_data=f"autosrv:flavour:{token}:{key}")]
+                     for key, label in HYPERVISOR_FLAVOURS.items()]),
+            )
+            return
+        data = _pending_server_props.pop(token, None)
+        if not data:
+            await query.edit_message_text(expired)
+            return
+        data["kind"] = "vm"
+        await _confirm_autosrv(update, query, data)
+        return
+
+    if action == "flavour":
+        token, flavour = parts[2], parts[3]
+        data = _pending_server_props.pop(token, None)
+        if not data:
+            await query.edit_message_text(expired)
+            return
+        data["kind"] = "hypervisor"
+        data["flavour"] = flavour
+        await _confirm_autosrv(update, query, data)
+        return
+
+    logger.error("unknown autosrv action: %s", action)
 
 
 async def cmd_schedule_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -9791,7 +9977,7 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
         return True
 
     if step == "user":
-        if not re.match(r"^[a-z_][a-z0-9_-]{0,31}$", text):
+        if not _USER_RE.match(text):
             await _msg(update).reply_text(_t(lang, "That doesn't look like a username. Try again.",
                                                   "Itu tidak seperti username. Coba lagi."))
             return True
@@ -9889,12 +10075,12 @@ async def _handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYP
     return True
 
 
-async def _finish_addserver(update: Update, query, discovery: str = "") -> None:
-    chat_id = update.effective_chat.id
-    state = _drop_server_wizard(chat_id)
-    if not state:
-        return
-    data = state["data"]
+async def _register_server(update: Update, query, data: dict, discovery: str = "") -> None:
+    """The write itself: ~/.ssh/config, servers.json, the agent's brief, and a
+    report back. Shared between the manual /addserver wizard (_finish_addserver)
+    and auto-registration proposed by the model after a task (_confirm_autosrv)
+    -- both arrive here with the same fully-known `data`, just gathered a
+    different way, so there is exactly one place that performs the write."""
     items = [s for s in _read_servers() if s["name"] != data["name"]]
     items.append({
         **data,
@@ -9948,6 +10134,15 @@ async def _finish_addserver(update: Update, query, discovery: str = "") -> None:
     if still_open:
         msg += harden_ssh_advice(lang)
     await query.edit_message_text(msg, parse_mode="HTML")
+
+
+async def _finish_addserver(update: Update, query, discovery: str = "") -> None:
+    """The manual /addserver wizard's own last step: pop its state, then run
+    the write both paths share."""
+    state = _drop_server_wizard(update.effective_chat.id)
+    if not state:
+        return
+    await _register_server(update, query, state["data"], discovery)
 
 
 async def cmd_servers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -10990,6 +11185,7 @@ async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     reply_text = result.get("result") or _t(lang, "(no response)", "(tidak ada respons)")
     reply_text, learned_facts = extract_learned(reply_text)
     reply_text, schedule_proposals = extract_schedules(reply_text)
+    reply_text, server_proposals = extract_server_proposals(reply_text)
     reply_text, snapshots_taken = extract_snapshots(reply_text)
     reply_text, needs_write = extract_needs_write(reply_text)
     reply_text, gdrive_ops = extract_gdrive_mutations(reply_text)
@@ -11037,6 +11233,13 @@ async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, te
                 logger.warning(
                     "ignored %d SCHEDULE: proposal(s) from an origin not allowed to manage schedules (chat=%s)",
                     len(schedule_proposals), chat_id,
+                )
+            if server_proposals and await _may_authorize_group_action(update, context):
+                await offer_server_registration(update, server_proposals)
+            elif server_proposals:
+                logger.warning(
+                    "ignored %d SERVER: proposal(s) from an origin not allowed to manage servers (chat=%s)",
+                    len(server_proposals), chat_id,
                 )
             if newly_learned:
                 # Visible, not silent: auto-writes the user can't see are how a
@@ -11351,6 +11554,7 @@ def main() -> None:
     app.add_handler(CommandHandler("unschedule", cmd_unschedule))
     app.add_handler(CommandHandler("adopt", cmd_adopt))
     app.add_handler(CallbackQueryHandler(cmd_schedule_decision, pattern="^sched_(ok|no):"))
+    app.add_handler(CallbackQueryHandler(cmd_autosrv_button, pattern="^autosrv:"))
     app.add_handler(CommandHandler("unlock", cmd_unlock))
     app.add_handler(CommandHandler("lock", cmd_lock))
     app.add_handler(CommandHandler("usemodel", cmd_usemodel))

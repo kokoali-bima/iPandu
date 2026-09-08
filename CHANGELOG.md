@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.2b.92 -- registering what the model just built, without the wizard
+
+v0.2b.91 fixed the input side of a real incident: a subnet was treated as an
+unregistered host, and a password in a create-VM prompt was deleted before the
+task ever ran. Its own commit named what was left: post-execution
+auto-registration. This is that.
+
+The scenario: the operator had the bot clone two VMs on a Proxmox cluster,
+entirely through chat -- name, spec, network, credentials, all in one message,
+no /addserver. Once the VMs existed and were reachable, there was still no way
+into /servers except re-typing name, host, user and port into the manual
+wizard, one message at a time, for information the model had already reported
+a few lines above.
+
+The model now ends a reply with one line per host it just finished making
+reachable:
+
+    SERVER: name=<slug> | host=<ip> | user=<user> | port=<port>
+
+Each becomes a card: register it? Then a choice -- hypervisor or VM, exactly
+the two options asked for -- and then the same PIN /addserver has always
+required. Nothing is written until it checks out; tapping Register only asks
+what kind of machine it is, nothing else, because the model already reported
+everything the manual wizard would otherwise ask for one field at a time.
+
+The write itself is not a second implementation. `_register_server` is lifted
+out of the old `_finish_addserver` -- rebuild `~/.ssh/config`, save to
+`servers.json`, note it in the agent's brief, report back -- so the manual
+wizard and this new path share the exact same tail, and there is exactly one
+place that performs it.
+
+This works for either model without special-casing one of them. The
+instruction lives in `CAPABILITIES_BRIEF`, injected into both Claude's
+`--append-system-prompt` and agy's prompt on every fresh conversation -- the
+same mechanism that already carries every other capability to both CLIs on
+every `/update`, rather than SOUL.md/GEMINI.md, which are written once by
+install and never touched again. Kept to about 90 tokens so the brief as a
+whole stays under its own 800-token budget.
+
+Registered as E025. **1,120 checks across 50 suites.**
+
 ## v0.2b.91 -- a subnet is not a server, and your message is not deleted unasked
 
 Two faults from one screenshot. Asking "carikan 2 ip dari subnet 10.10.59.0/24"
