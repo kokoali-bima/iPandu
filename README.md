@@ -96,6 +96,16 @@ down, this is the map.
 - The agent can write a file and hand it back through Telegram, or -- see
   [Google Drive](#google-drive-optional) -- drop it straight into a shared folder,
   connected the same explicit, Telegram-driven way as everything else here.
+- A room's upload folder can be **pinned by browsing to it** (`/gdrivefolder`),
+  and pointed at a **shared drive** specifically (`/gdrivetarget`) -- rclone
+  treats one as a different root, not a longer path, so no destination typed
+  in chat could otherwise reach one.
+
+**A firewall is a machine too**
+- [OPNsense](#opnsense-optional) reads are ungated; writes need the same
+  `/unlock` window as everything else here, and the running config is backed
+  up before the first change of each window -- never a copy of the write-gate
+  rule, the rule itself.
 
 **Stays out of the way when nothing's wrong**
 - `/status`, `/providers`, `/servers`, `/schedules`, `/boundaries`, `/snapshots`,
@@ -440,6 +450,8 @@ Ollama, say), since something has to translate between protocols.
 | `/gdrivestatus` | **0 tokens** | Is each connected Drive account still working? |
 | `/gdrive` (disconnect) | owner/admin | Same card also disconnects an account: revokes access at Google, deletes the local token, deletes nothing in Drive |
 | `/gdrive` | owner/admin, **0 tokens** | Pick (or show) which connected Drive account this room uploads to |
+| `/gdrivefolder` | owner/admin, **0 tokens** | Pin this room's upload folder by browsing to it; `/gdrivefolder off` reverts |
+| `/gdrivetarget` | owner/admin, **0 tokens** | Show/set which shared drive (or My Drive) this room's account writes to |
 | `/lang` (or `/language`) | owner/admin, **0 tokens** | Set/show this chat's language for the bot's own fixed replies (`en`/`id`) |
 | `/mode` | **0 tokens** | Read-only right now, or able to change things? |
 | `/unlock [min]` | owner/admin | Open a time-boxed window for real changes (capped at 10 min from a group) |
@@ -706,6 +718,57 @@ Fixing one means setting up your own OAuth client and running `/connectgdrive`
 again for that account. Reconnecting is unavoidable, not laziness in the
 implementation: a refresh token belongs to the client that issued it, so an
 existing one cannot be re-pointed at a new client.
+
+**`/gdrivefolder` pins the upload folder by browsing to it** — the model
+otherwise writes a fresh folder name every turn ("Laporan", then "laporan/2026",
+then "Reports/september"), and nothing ever errors, because rclone happily
+creates whatever it's given. Browsing the real tree once — My Drive or any
+shared drive, folder by folder, then "use this one" — fixes the destination for
+that room. Only the model's filename survives from then on; its directories are
+dropped, and the group-name subfolder isn't added either, since browsing to a
+folder already meant that one, not a child of it. `/gdrivefolder off` reverts to
+the old per-turn behaviour. Delete and move stay fenced inside the pinned
+folder — writing into a place you already keep things in is additive, deleting
+from it is not.
+
+**A shared drive needs its own path, and its own OAuth client.** rclone models a
+shared drive as a different root, not a longer path — no destination typed as
+"the shared drive X" can reach one. `/gdrivetarget` shows where a room's account
+currently writes, lists the shared drives it can see, and points it at one (or
+back at My Drive with `/gdrivetarget mydrive`); `/gdrive` picks *which* account,
+this picks *where inside it*. And because the `drive.file` scope the
+zero-setup and device-flow paths issue can only ever see files the bot itself
+created — never a shared drive somebody else made — reaching one needs the full
+`drive` scope, which only `/connectgdrive manual` can request. That path also
+needs a **second, different kind of OAuth client**: the device flow's "TV and
+Limited Input devices" client cannot do the loopback redirect `rclone
+authorize` uses, so `/connectgdrive setupclient desktop` stores a second client
+in the same Google Cloud project, and the manual instructions attach it
+automatically once it exists.
+
+### OPNsense (optional)
+
+Lets the agent query and change an OPNsense firewall, through `tools/opn` —
+one key, since OPNsense grants privileges per *page* rather than per verb, so a
+"read-only" key would still cover most of what a "write" key does; a real
+boundary needs a wrapper, not a second credential.
+
+- **Reads are ungated.** Most of what a firewall gets asked is a read, and
+  gating those is friction with nothing behind it.
+- **Writes require `/unlock` to be open** — checked against the exact file
+  `unlock_write_mode()` writes, expiry included, not a copy of the rule. The
+  refusal names `/unlock` and says reads still work, so nobody opens the
+  window merely to look.
+- **No write without a rollback point first.** The running config is
+  downloaded before the first change of each window; if that download fails,
+  the change does not happen either. Paired with OPNsense's own configuration
+  history, a bad change is one revert away.
+- Raises the on-demand VPN itself when the firewall sits behind one, since a
+  plain `curl` never goes through the `ssh` `ProxyCommand` an interactive
+  session would.
+
+The brief only mentions OPNsense where the credentials for it actually exist,
+so a deployment without them is never offered a tool it cannot use.
 
 ### MCP servers (optional)
 
@@ -1019,6 +1082,7 @@ GEMINI.md.template          same, for agy (same content, different tool names)
 tools/
   list_tools.py              prints the graduated-skill registry
   registry.json              starts empty; /graduate appends to it
+  opn                        OPNsense API wrapper, writes tied to /unlock
 examples/proxmox/           filled-in reference against a real Proxmox VE cluster
   SOUL.md.example
   GEMINI.md.example
