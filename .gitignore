@@ -55,3 +55,4 @@ tools/registry.json
 # ikut kalau repo ini di-PR ke upstream.
 CLAUDE.md
 HANDOVER-*.md
+gdrive_dest.json

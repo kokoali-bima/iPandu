@@ -5115,6 +5115,68 @@ def _write_gdrive_room_accounts(items: dict) -> None:
     GDRIVE_ROOM_ACCOUNTS_FILE.write_text(json.dumps(items, indent=2))
 
 
+# --------------------------------------------------------------------------
+# A destination this room PICKED, by browsing to it.
+#
+# Without one, the folder comes from whatever the model wrote after the arrow
+# in `GDRIVE: <file> -> <folder/name>`. That is a guess, and it is a fresh
+# guess every turn: the same weekly report landed in "Laporan", then
+# "laporan/september", then "Reports/2026" -- three folders nobody chose, and
+# the operator hunting for the file each time. rclone creates missing folders
+# silently, so nothing ever failed; it just scattered.
+#
+# So a room can pin one, and pinning it changes two things:
+#
+#   * the model's directories are DROPPED and only its filename is used.
+#     Keeping them would reopen the same hole one level down.
+#   * the group-name subfolder is not added either. Somebody who browsed to a
+#     folder and pressed "use this one" meant that folder, not a child of it.
+#
+# Uploads only. Delete and move stay fenced inside GDRIVE_ROOT by
+# _gdrive_safe_path(), because a pinned folder is somewhere the operator
+# already keeps things -- writing into it is additive, deleting from it is not.
+GDRIVE_DEST_FILE = BASE_DIR / "gdrive_dest.json"
+
+
+def _read_gdrive_dest() -> dict:
+    if not GDRIVE_DEST_FILE.exists():
+        return {}
+    try:
+        return json.loads(GDRIVE_DEST_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("gdrive_dest.json unreadable", exc_info=True)
+        return {}
+
+
+def _write_gdrive_dest(items: dict) -> None:
+    GDRIVE_DEST_FILE.write_text(json.dumps(items, indent=2), encoding="utf-8")
+
+
+def gdrive_pinned_dest(chat_id: str) -> Optional[dict]:
+    """This room's pinned destination, or None.
+
+    Guarded on the account still existing: an account can be disconnected
+    after a room pinned a folder inside it, and silently uploading to a
+    different account's identically-named folder is exactly the class of
+    surprise this feature exists to end.
+    """
+    entry = _read_gdrive_dest().get(str(chat_id))
+    if not isinstance(entry, dict) or not entry.get("account"):
+        return None
+    if entry["account"] not in _list_gdrive_accounts():
+        return None
+    return entry
+
+
+def set_gdrive_pinned_dest(chat_id: str, entry: Optional[dict]) -> None:
+    items = _read_gdrive_dest()
+    if entry is None:
+        items.pop(str(chat_id), None)
+    else:
+        items[str(chat_id)] = entry
+    _write_gdrive_dest(items)
+
+
 def _gdrive_effective_default(chat_id: str, accounts: list[str]) -> Optional[str]:
     """This room's explicitly chosen account, or -- if it has never chosen and
     there is only ONE account connected -- that one, since there is no real
@@ -5157,12 +5219,19 @@ async def _gdrive_effective_path(update: Update, context: ContextTypes.DEFAULT_T
     return f"{folder}/{rel}"
 
 
-def _gdrive_upload(remote: str, local_path: str, drive_rel_path: str) -> tuple[bool, str]:
-    """Copy one local file to <remote>:GDRIVE_ROOT/drive_rel_path via rclone,
+def _gdrive_upload(remote: str, local_path: str, drive_rel_path: str,
+                   root: Optional[str] = None) -> tuple[bool, str]:
+    """Copy one local file to <remote>:<root>/drive_rel_path via rclone,
     then fetch a shareable link. Blocking -- call via loop.run_in_executor.
     rclone creates any missing intermediate folders on its own, so the
-    caller never needs to check or create the destination first."""
-    dest = f"{remote}:{GDRIVE_ROOT}/{drive_rel_path}"
+    caller never needs to check or create the destination first.
+
+    `root` defaults to GDRIVE_ROOT, the folder the bot makes for itself. A
+    room that pinned a destination passes that folder instead, and an empty
+    string means the drive's own root.
+    """
+    base = GDRIVE_ROOT if root is None else root
+    dest = f"{remote}:{base}/{drive_rel_path}" if base else f"{remote}:{drive_rel_path}"
     rclone = _rclone_path() or RCLONE_BIN
     try:
         subprocess.run(
@@ -5249,9 +5318,31 @@ async def _send_to_gdrive(update: Update, context: ContextTypes.DEFAULT_TYPE, re
             "\U0001f4c1 Room ini belum pilih akun Drive -- jalankan /gdrive untuk pilih.",
         ))
         return
-    rel_path = await _gdrive_effective_path(update, context, req["to"])
+    # A pinned destination overrides both the model's folders and the
+    # group-name subfolder, and it also decides WHICH account -- pinning
+    # browsed inside one, so honouring the room's default account here could
+    # aim the upload at a folder of the same name somewhere else entirely.
+    pinned = gdrive_pinned_dest(chat_id)
+    if pinned:
+        remote = pinned["account"]
+        root = pinned.get("folder", "")
+        # team_drive is per-ACCOUNT config, so another room that pinned a
+        # different drive on the same account has moved the root since. Check
+        # and put it back, or this upload silently lands in the other drive at
+        # the same folder name -- the exact failure this feature removes.
+        loop = asyncio.get_running_loop()
+        if await loop.run_in_executor(None, gdrive_target, remote) != pinned.get("drive_id", ""):
+            await loop.run_in_executor(
+                None, set_gdrive_target, remote, pinned.get("drive_id", ""))
+        upload_rel = req["to"].rstrip("/").rsplit("/", 1)[-1] or p.name
+        rel_path = f"{root}/{upload_rel}" if root else upload_rel
+    else:
+        root = None
+        upload_rel = await _gdrive_effective_path(update, context, req["to"])
+        rel_path = upload_rel
     loop = asyncio.get_running_loop()
-    ok, detail = await loop.run_in_executor(None, _gdrive_upload, remote, str(p), rel_path)
+    ok, detail = await loop.run_in_executor(
+        None, _gdrive_upload, remote, str(p), upload_rel, root)
     if ok:
         # detail is the share link, or "" when the file uploaded but the
         # link call did not come back. Measured against the live remote,
@@ -7390,6 +7481,7 @@ Every reply ends with a "— by ..." tag. If it's ever NOT "{TIERS[0]['label']}"
 /connectgdrive — connect a new Drive account, through Telegram (owner anywhere, or a registered group's own admin)
 /forget <number> — delete one wrong learned fact (numbers come from /learned)
 /gdrive — pick (or show) which connected Drive account this room uploads to (0 tokens)
+/gdrivefolder [off] — browse to an upload folder and pin it, so the agent supplies only the filename
 /gdrivestatus — is each connected Drive account still working? (0 tokens)
 /gdrivetarget [id|mydrive] — write into a shared drive instead of My Drive (a shared drive is a different root, not a longer path)
 /graduate <name> — turn the case you JUST solved into a reusable script (free to reuse afterward)
@@ -7464,6 +7556,7 @@ Setiap balasan diakhiri tanda "— by ...". Kalau tandanya BUKAN "{TIERS[0]['lab
 /connectgdrive — hubungkan akun Drive baru, lewat Telegram (owner di mana saja, atau admin grup terdaftar)
 /forget <nomor> — hapus satu catatan hasil belajar yang keliru (nomornya dari /learned)
 /gdrive — pilih (atau lihat) akun Drive mana yang dipakai room ini untuk upload (NOL token)
+/gdrivefolder [off] — telusuri folder tujuan lalu kunci, jadi agen cuma menyetor nama filenya
 /gdrivestatus — apakah tiap akun Drive yang terhubung masih jalan? (0 token)
 /gdrivetarget [id|mydrive] — tulis ke shared drive, bukan My Drive (shared drive itu root yang berbeda, bukan sekadar path yang lebih panjang)
 /graduate <nama> — ubah kasus yang BARU SAJA selesai jadi script reusable (gratis dipakai lagi)
@@ -8352,6 +8445,204 @@ async def cmd_gdrivetarget(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "Pilih dengan <code>/gdrivetarget &lt;id&gt;</code>, atau kembali ke My "
         "Drive dengan <code>/gdrivetarget mydrive</code>."))
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+# chat_id -> the picker's position. Held here rather than in callback_data
+# because Telegram caps that at 64 bytes and a Drive path routinely exceeds it;
+# the buttons carry an index into this instead.
+_gdrive_picker: dict[int, dict] = {}
+GDRIVE_PICKER_TTL = 900
+
+
+def _gdrive_picker_rows(state: dict, lang: str) -> list[list[InlineKeyboardButton]]:
+    """The keyboard for wherever the picker currently stands."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if state["step"] == "drive":
+        rows.append([InlineKeyboardButton("📁 My Drive", callback_data="gdf:drive:-1")])
+        for i, d in enumerate(state["drives"][:20]):
+            rows.append([InlineKeyboardButton(f"🗂 {d['name']}"[:60],
+                                              callback_data=f"gdf:drive:{i}")])
+    else:
+        for i, f in enumerate(state["folders"][:20]):
+            rows.append([InlineKeyboardButton(f"📂 {f}"[:60], callback_data=f"gdf:open:{i}")])
+        nav = [InlineKeyboardButton(_t(lang, "✅ Use this folder", "✅ Pakai folder ini"),
+                                    callback_data="gdf:use")]
+        if state["path"]:
+            nav.insert(0, InlineKeyboardButton(_t(lang, "⬆️ Up", "⬆️ Naik"),
+                                               callback_data="gdf:up"))
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(_t(lang, "✖️ Cancel", "✖️ Batal"),
+                                      callback_data="gdf:cancel")])
+    return rows
+
+
+def _gdrive_picker_text(state: dict, lang: str) -> str:
+    if state["step"] == "drive":
+        return _t(lang,
+            f"📁 <b>Where should {_tg_escape(state['account'])} upload?</b>\n\n"
+            "Pick My Drive or a shared drive; you choose the folder inside it next.",
+            f"📁 <b>{_tg_escape(state['account'])} upload ke mana?</b>\n\n"
+            "Pilih My Drive atau shared drive; folder di dalamnya dipilih setelah ini.")
+    where = state["drive_name"] or "My Drive"
+    here = state["path"] or "/"
+    empty_en = "\n\n<i>No subfolders here.</i>" if not state["folders"] else ""
+    empty_id = "\n\n<i>Tidak ada subfolder di sini.</i>" if not state["folders"] else ""
+    return _t(lang,
+        f"📁 <b>{_tg_escape(where)}</b>\nNow at: <code>{_tg_escape(here)}</code>\n\n"
+        f"Open a folder to go deeper, or use this one.{empty_en}",
+        f"📁 <b>{_tg_escape(where)}</b>\nSekarang di: <code>{_tg_escape(here)}</code>\n\n"
+        f"Buka folder untuk masuk lebih dalam, atau pakai yang ini.{empty_id}")
+
+
+async def _gdrive_picker_show(query, state: dict, lang: str) -> None:
+    await query.edit_message_text(
+        _gdrive_picker_text(state, lang), parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(_gdrive_picker_rows(state, lang)))
+
+
+async def cmd_gdrivefolder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Browse to an upload folder and pin it, instead of retyping a path.
+
+    /gdrive picks the account and /gdrivetarget picks My Drive vs a shared
+    drive. Neither settles the folder, which is the part that kept moving:
+    the model writes it fresh each turn, rclone creates whatever it names,
+    and the file lands somewhere nobody chose. This walks the real folder
+    tree and stores the answer, so the destination stops being a guess.
+    """
+    if not await _may_authorize_group_action(update, context):
+        return
+    lang = _chat_lang(update)
+    msg = _msg(update)
+    chat_id = update.effective_chat.id
+    accounts = _list_gdrive_accounts()
+    if not accounts:
+        await msg.reply_text(_t(lang,
+            "📁 No Google Drive account is connected yet -- /connectgdrive first.",
+            "📁 Belum ada akun Google Drive yang terhubung -- /connectgdrive dulu."))
+        return
+
+    arg = (context.args[0].strip().lower() if context.args else "")
+    if arg in ("off", "clear", "hapus", "mati"):
+        set_gdrive_pinned_dest(str(chat_id), None)
+        await msg.reply_text(_t(lang,
+            "📁 Pinned folder cleared. Uploads go back to being placed by the "
+            "model, under this room's own folder.",
+            "📁 Folder tetap dihapus. Upload kembali ditempatkan oleh model, "
+            "di bawah folder milik room ini."))
+        return
+
+    account = _gdrive_effective_default(str(chat_id), accounts)
+    if not account:
+        await msg.reply_text(_t(lang,
+            "📁 This room has not picked a Drive account yet -- run /gdrive first.",
+            "📁 Room ini belum memilih akun Drive -- jalankan /gdrive dulu."))
+        return
+
+    loop = asyncio.get_running_loop()
+    ok, drives = await loop.run_in_executor(None, gdrive_shared_drives, account)
+    state = {"account": account, "step": "drive",
+             "drives": (drives if ok else []), "drive_id": "", "drive_name": "",
+             "path": "", "folders": [],
+             "expires": _dt.datetime.now().timestamp() + GDRIVE_PICKER_TTL}
+    _gdrive_picker[chat_id] = state
+    note = ""
+    if not ok:
+        # Not fatal: My Drive is still pickable, and saying why the shared
+        # drives are missing beats an unexplained short list.
+        note = _t(lang, f"\n\n<i>Shared drives could not be listed: {_tg_escape(str(drives))}</i>",
+                        f"\n\n<i>Shared drive tidak bisa didaftar: {_tg_escape(str(drives))}</i>")
+    await msg.reply_text(
+        _gdrive_picker_text(state, lang) + note, parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(_gdrive_picker_rows(state, lang)))
+
+
+async def cmd_gdrivefolder_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await _safe_answer(query)
+    lang = _chat_lang(update)
+    chat_id = update.effective_chat.id
+    if not await _may_authorize_group_action(update, context):
+        return
+    state = _gdrive_picker.get(chat_id)
+    if not state or state["expires"] < _dt.datetime.now().timestamp():
+        _gdrive_picker.pop(chat_id, None)
+        await query.edit_message_text(_t(lang,
+            "That picker expired. Run /gdrivefolder again.",
+            "Picker itu kedaluwarsa. Jalankan /gdrivefolder lagi."))
+        return
+    action, _, arg = query.data.split(":", 1)[1].partition(":")
+    loop = asyncio.get_running_loop()
+
+    if action == "cancel":
+        _gdrive_picker.pop(chat_id, None)
+        await query.edit_message_text(_t(lang,
+            "✖️ Nothing changed.", "✖️ Tidak ada yang diubah."))
+        return
+
+    async def browse(path: str) -> None:
+        ok, folders = await loop.run_in_executor(
+            None, gdrive_list_folders, state["account"], path)
+        if not ok:
+            await query.edit_message_text(_t(lang,
+                f"⚠️ Could not list that folder: {_tg_escape(str(folders))}",
+                f"⚠️ Tidak bisa mendaftar folder itu: {_tg_escape(str(folders))}"),
+                parse_mode="HTML")
+            return
+        state.update(step="browse", path=path, folders=folders)
+        await _gdrive_picker_show(query, state, lang)
+
+    if action == "drive":
+        idx = int(arg)
+        drive_id = "" if idx < 0 else state["drives"][idx]["id"]
+        drive_name = "" if idx < 0 else state["drives"][idx]["name"]
+        # rclone models a shared drive as the remote's ROOT, so browsing one
+        # means pointing the remote at it first. That is per-account config,
+        # not per-room -- another room using the same account is moved too,
+        # which is why the confirmation says which drive was chosen.
+        ok, detail = await loop.run_in_executor(
+            None, set_gdrive_target, state["account"], drive_id)
+        if not ok:
+            await query.edit_message_text(_t(lang,
+                f"⚠️ Could not switch to that drive: {_tg_escape(str(detail))}",
+                f"⚠️ Tidak bisa pindah ke drive itu: {_tg_escape(str(detail))}"),
+                parse_mode="HTML")
+            return
+        state.update(drive_id=drive_id, drive_name=drive_name)
+        await browse("")
+        return
+
+    if action == "open":
+        folder = state["folders"][int(arg)]
+        await browse(f"{state['path']}/{folder}" if state["path"] else folder)
+        return
+
+    if action == "up":
+        await browse(state["path"].rsplit("/", 1)[0] if "/" in state["path"] else "")
+        return
+
+    if action == "use":
+        set_gdrive_pinned_dest(str(chat_id), {
+            "account": state["account"], "drive_id": state["drive_id"],
+            "drive_name": state["drive_name"], "folder": state["path"],
+        })
+        _gdrive_picker.pop(chat_id, None)
+        where = state["drive_name"] or "My Drive"
+        shown = state["path"] or "/"
+        logger.warning("gdrive destination pinned chat=%s account=%s drive=%s folder=%s",
+                       chat_id, state["account"], state["drive_id"] or "mydrive",
+                       state["path"])
+        await query.edit_message_text(_t(lang,
+            f"✅ Uploads from this room now go to <b>{_tg_escape(where)}</b> → "
+            f"<code>{_tg_escape(shown)}</code>, on account "
+            f"<b>{_tg_escape(state['account'])}</b>.\n\n"
+            "Only the filename comes from the agent now -- it can no longer "
+            "invent a folder. Undo with <code>/gdrivefolder off</code>.",
+            f"✅ Upload dari room ini sekarang ke <b>{_tg_escape(where)}</b> → "
+            f"<code>{_tg_escape(shown)}</code>, di akun "
+            f"<b>{_tg_escape(state['account'])}</b>.\n\n"
+            "Yang datang dari agen tinggal nama filenya -- ia tidak bisa lagi "
+            "mengarang folder. Batalkan dengan <code>/gdrivefolder off</code>."),
+            parse_mode="HTML")
 
 
 async def cmd_gdrive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -9435,6 +9726,28 @@ def gdrive_shared_drives(name: str) -> tuple[bool, object]:
         return False, "rclone returned something that is not JSON"
     return True, [{"id": d.get("id", ""), "name": d.get("name", "")}
                   for d in drives if d.get("id")]
+
+
+def gdrive_list_folders(name: str, path: str) -> tuple[bool, object]:
+    """Subfolders of `path`, inside whatever root the remote points at now.
+
+    --dirs-only because this picker chooses a folder; listing the files too
+    would make a busy folder unusable in a Telegram keyboard for no gain.
+    """
+    target = f"{name}:{path}" if path else f"{name}:"
+    try:
+        r = _rclone_run("lsjson", "--dirs-only", "--no-modtime", target, timeout=60)
+    except Exception as exc:
+        return False, f"could not ask rclone: {exc}"
+    if r.returncode != 0:
+        return False, (r.stderr or r.stdout or "").strip()[:300] or "rclone could not list that folder"
+    try:
+        rows = json.loads(r.stdout or "[]")
+    except (json.JSONDecodeError, ValueError):
+        return False, "rclone returned something that is not JSON"
+    names = sorted((row.get("Name", "") for row in rows if row.get("Name")),
+                   key=str.casefold)
+    return True, names
 
 
 def gdrive_target(name: str) -> str:
@@ -12345,9 +12658,11 @@ def main() -> None:
     app.add_handler(CommandHandler("usemodel", cmd_usemodel))
     app.add_handler(CommandHandler("gdrive", cmd_gdrive))
     app.add_handler(CommandHandler("gdrivetarget", cmd_gdrivetarget))
+    app.add_handler(CommandHandler("gdrivefolder", cmd_gdrivefolder))
     app.add_handler(CommandHandler("connectgdrive", cmd_connectgdrive))
     app.add_handler(CommandHandler(["lang", "language"], cmd_lang))
     app.add_handler(CallbackQueryHandler(cmd_gdrive_button, pattern="^gdrv:"))
+    app.add_handler(CallbackQueryHandler(cmd_gdrivefolder_button, pattern="^gdf:"))
     app.add_handler(CommandHandler("mode", cmd_mode))
     app.add_handler(CommandHandler("learned", cmd_learned))
     app.add_handler(CommandHandler("forget", cmd_forget))

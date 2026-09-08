@@ -18,6 +18,46 @@
      that gap, but that is the maintainer's call, not something a contributing
      branch should decide by editing a check written one release ago. -->
 
+## Unreleased -- pin the Drive folder by browsing to it
+
+The folder after the arrow in `GDRIVE: <file> -> <folder/name>` is written by
+the MODEL, freshly each turn. Reported from a live room: the same weekly report
+landed in "Laporan", then "laporan/september", then "Reports/2026". Nothing ever
+errored -- rclone creates whatever it is given -- so it just scattered, and the
+file had to be hunted for each time.
+
+`/gdrivefolder` walks the real tree instead: My Drive or any shared drive, then
+folder by folder, then "use this one". Pinning changes two things, and both are
+the point. The model's directories are dropped and only its filename survives --
+honouring them would reopen the same hole one level down. And the group-name
+subfolder is not added either: somebody who browsed to a folder meant that
+folder, not a child of it. `/gdrivefolder off` puts it back.
+
+Four things that would have bitten later:
+
+  Telegram caps `callback_data` at 64 bytes and a Drive path routinely exceeds
+  it, so the buttons carry an index and the position is held bot-side.
+
+  `team_drive` is per-ACCOUNT rclone config, not per-room. A second room
+  pinning a different shared drive on the same account moves the root under the
+  first one, whose next upload would land in the wrong drive at the same folder
+  name -- the exact failure this removes. The upload path re-asserts it.
+
+  The pin carries the ACCOUNT too. Browsing happened inside one; honouring the
+  room's default account instead could aim the upload at a same-named folder
+  somewhere else.
+
+  Delete and move stay fenced inside GDRIVE_ROOT by `_gdrive_safe_path()`.
+  Writing into a folder the operator already keeps things in is additive;
+  deleting from it is not.
+
+Two of my own mistakes, caught by suites already here: a `write_text()` on
+Windows rewrote all of `lite_agent.py` with CRLF (`read_text` translates on the
+way in, `write_text` on the way out), and the new `/help` line went in after
+`/gdrivetarget` when `f` sorts before `s`.
+
+48 checks in `dev/test_gdrive_folder_picker.py`. 1475/1477 across 59 suites.
+
 ## Unreleased -- snapshots: the right guest, the right node, the right tool
 
 The operator's standing rule is "always snapshot before changing a VM". The bot
