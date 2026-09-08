@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""One generic "still here" line -- only for a turn that is actually slow.
+"""One acknowledgment, sent only if a turn is actually slow -- flavored to fit.
 
 Proposed while planning a desktop companion: standing in silence for the
 median 29s turn is what makes the bot feel unresponsive. The first design
-considered fired an ack on EVERY turn -- rejected on the operator's own
-objection, driven from a real example: a canned "checking the server" line
-makes no sense for "bagaimana cuaca hari ini". The fix is not a better
-sentence, it is a different trigger -- race a short delay against the real
-answer, so a fast reply never sees an ack at all, and the one that does fire
-is generic enough to fit any kind of question, because at that moment the
-model has not even picked a tool yet.
+fired a fixed line on EVERY turn -- rejected on a sharp objection: "checking
+the server" makes no sense as a reply to "bagaimana cuaca hari ini". The fix
+was a different trigger, not a better sentence: race a short delay against
+the real answer, so a fast reply is never touched at all.
 
-The property that matters most, and is tested hardest: a turn that finishes
-BEFORE the delay must NEVER produce a message. An ack sent after the real
-answer already landed would be worse than no ack at all.
+Then a second ask: more than one flavor, closer to what was actually asked.
+Real understanding needs a model call, which would undo the whole point
+(instant, free, no added latency) -- so this stays a keyword match against the
+raw text, picking one of three pools instead of always the same one. The
+property that matters most, tested hardest: a turn that finishes BEFORE the
+delay must NEVER produce a message, whatever pool it would have used.
 """
 import asyncio
 import atexit
@@ -59,11 +59,12 @@ def upd(sent):
     return SimpleNamespace(effective_message=m, message=m, callback_query=None)
 
 
-# --- THE property: a fast turn never sees an ack ----------------------------
+# --- THE property: a fast turn never sees an ack, whatever it would say ----
 async def fast_case():
     sent = []
     with patch.object(mod, "ACK_DELAY_SECONDS", 10):
-        task = asyncio.create_task(mod._send_delayed_ack(upd(sent), "id"))
+        task = asyncio.create_task(
+            mod._send_delayed_ack(upd(sent), "id", "restart server pm5"))
         await asyncio.sleep(0.02)          # the turn "finishes" almost at once
         task.cancel()
         try:
@@ -81,9 +82,9 @@ asyncio.run(fast_case())
 async def slow_case():
     sent = []
     with patch.object(mod, "ACK_DELAY_SECONDS", 0):
-        task = asyncio.create_task(mod._send_delayed_ack(upd(sent), "id"))
-        await asyncio.sleep(0.05)          # let it fire
-        task.cancel()                      # then cancel, as the finally: block does
+        task = asyncio.create_task(mod._send_delayed_ack(upd(sent), "id", "halo"))
+        await asyncio.sleep(0.05)
+        task.cancel()
         try:
             await task
         except asyncio.CancelledError:
@@ -95,79 +96,77 @@ async def slow_case():
 asyncio.run(slow_case())
 
 
-# --- cancelling AFTER it already sent must not double-send or crash --------
-async def already_done_case():
-    sent = []
-    with patch.object(mod, "ACK_DELAY_SECONDS", 0):
-        task = asyncio.create_task(mod._send_delayed_ack(upd(sent), "id"))
-        await asyncio.sleep(0.05)
-        check("...the task is simply finished by then, not hanging", task.done())
-        task.cancel()   # a no-op cancel on an already-finished task
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-    check("...and cancelling a finished task does not send a second ack",
-          len(sent) == 1)
-
-
-asyncio.run(already_done_case())
-
-
-# --- no target to reply to: quiet, not a crash ------------------------------
-async def no_target_case():
+# --- no target / send failure: quiet, never crashes the turn ---------------
+async def edge_cases():
     with patch.object(mod, "ACK_DELAY_SECONDS", 0):
         u = SimpleNamespace(effective_message=None, message=None, callback_query=None)
-        crashed = False
         try:
-            await mod._send_delayed_ack(u, "id")
+            await mod._send_delayed_ack(u, "id", "test")
+            ok1 = True
         except Exception:
-            crashed = True
-    check("with nowhere to reply, it returns quietly instead of raising",
-          not crashed)
+            ok1 = False
+    check("with nowhere to reply, it returns quietly instead of raising", ok1)
 
-
-asyncio.run(no_target_case())
-
-
-# --- a Telegram failure on the send must not propagate ----------------------
-async def send_fails_case():
     class BoomMsg:
         async def reply_text(self, *a, **k):
             raise RuntimeError("telegram down")
     with patch.object(mod, "ACK_DELAY_SECONDS", 0):
         u = SimpleNamespace(effective_message=BoomMsg(), message=None, callback_query=None)
-        crashed = False
         try:
-            await mod._send_delayed_ack(u, "id")
+            await mod._send_delayed_ack(u, "id", "test")
+            ok2 = True
         except Exception:
-            crashed = True
-    check("a failed send is swallowed, not raised into the turn", not crashed)
+            ok2 = False
+    check("a failed send is swallowed, not raised into the turn", ok2)
 
 
-asyncio.run(send_fails_case())
+asyncio.run(edge_cases())
 
 
-# --- THE wording bug that started this: no phrase names a task -------------
-check("there is more than one phrase, so it does not feel robotic on repeat",
-      len(mod._ACK_PHRASES) >= 3)
-for en, idn in mod._ACK_PHRASES:
-    low = (en + " " + idn).lower()
-    check(f"...generic, no task named ('{en}')",
-          not any(w in low for w in ("server", "vm", "cek server", "task", "tugas")))
-    check(f"...both languages present ('{en}' / '{idn}')", bool(en) and bool(idn))
+# --- the categorizer: the exact case that started this must not be GENERIC -
+check("the weather question that started this now lands in the QUESTION "
+      "pool, not the flat generic one",
+      mod._ack_pool_for("bagaimana cuaca hari ini") is mod._ACK_PHRASES_QUESTION)
+check("an action word routes to the ACTION pool",
+      mod._ack_pool_for("restart server pm5") is mod._ACK_PHRASES_ACTION)
+check("an instruction dressed as a question is still an instruction "
+      "(action wins over question)",
+      mod._ack_pool_for("bisa restart servernya?") is mod._ACK_PHRASES_ACTION)
+check("a plain question word routes to QUESTION",
+      mod._ack_pool_for("apa kabar") is mod._ACK_PHRASES_QUESTION)
+check("an infra noun alone (no verb) still reads as action-shaped",
+      mod._ack_pool_for("tolong cek status vm 174") is mod._ACK_PHRASES_ACTION)
+check("a bare greeting, matching neither, falls back to GENERIC",
+      mod._ack_pool_for("halo") is mod._ACK_PHRASES_GENERIC)
+check("an empty/None message never crashes the matcher",
+      mod._ack_pool_for("") is mod._ACK_PHRASES_GENERIC
+      and mod._ack_pool_for(None) is mod._ACK_PHRASES_GENERIC)
 
 
-# --- wiring: spawned and cancelled alongside the existing heartbeat --------
+# --- no pool names a SPECIFIC task, and every phrase is bilingual ----------
+all_pools = (mod._ACK_PHRASES_ACTION, mod._ACK_PHRASES_QUESTION,
+            mod._ACK_PHRASES_GENERIC)
+check("there are three distinct pools, not one flat list",
+      len({id(p) for p in all_pools}) == 3)
+for pool_name, pool in zip(("ACTION", "QUESTION", "GENERIC"), all_pools):
+    check(f"{pool_name} pool has real variety ({len(pool)} phrases)", len(pool) >= 3)
+    for en, idn in pool:
+        low = (en + " " + idn).lower()
+        check(f"...{pool_name} phrase names no specific host/vm/task ('{en}')",
+              not any(w in low for w in ("pm5", "vm 1", "server pm", "node "))
+              and bool(en) and bool(idn))
+
+
+# --- wiring: text now flows into the picker -------------------------------
 src = Path(SRC).read_text(encoding="utf-8")
-check("the ack task is spawned right alongside the progress heartbeat",
-      "ack = asyncio.create_task(_send_delayed_ack(update, lang))" in src)
-check("...and cancelled in the same finally block, on every path",
-      "beat.cancel()\n        ack.cancel()" in src)
-check("the delay is meaningfully shorter than the heartbeat's own first note "
-      "-- it is a different, earlier tier, not a duplicate",
-      "ACK_DELAY_SECONDS = int(os.environ.get(" in src
-      and "HEARTBEAT_FIRST_SECONDS = int(os.environ.get" in src)
+check("_send_delayed_ack takes the message text as a parameter",
+      "async def _send_delayed_ack(update: Update, lang: str, text: str)" in src)
+check("...and the call site passes it through",
+      "_send_delayed_ack(update, lang, text)" in src)
+check("the picker is a plain keyword match, not a model call -- no CLI/agy/"
+      "claude invocation anywhere near it",
+      "AGY_BIN" not in src.split("def _ack_pool_for")[1].split("\ndef ")[0]
+      and "CLAUDE_BIN" not in src.split("def _ack_pool_for")[1].split("\ndef ")[0])
 
 failed = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed")

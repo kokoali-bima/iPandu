@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.2b.95 -- the ack fits the question, without asking a model what it is
+
+v0.2b.94 raced a short delay against the real answer so a fast reply never
+sees an acknowledgment at all, and gave the slow-turn case one deliberately
+generic line -- generic because at the moment it fires the model hasn't picked
+a tool yet. The follow-up ask: more than one flavor, closer to what was
+actually asked.
+
+Real understanding of the question needs a model call, which would undo the
+whole point of this feature -- instant, free, no latency added. So the ack's
+flavor is still picked with nothing more than a keyword match against the raw
+message text, choosing between three pools instead of always the same one:
+words like *restart, install, cek, backup, server, vm* route to an
+action-flavored line ("Oke, aku kerjakan dulu ya..."); a message shaped like a
+question (*apa, gimana, kenapa*, or a trailing "?") routes to a
+question-flavored one ("Hmm, aku pikir dulu ya..."); a message dressed as a
+question but carrying an action word still gets the action pool -- "bisa
+restart servernya?" is an instruction, not a question. Everything else keeps
+the original neutral pool.
+
+None of the three pools names a specific host, VM, or task -- the categoriser
+only sees the shape of the request, never its target, so "restart node pm5"
+and "restart the mail server" get the same flavor, correctly, without needing
+to understand either one.
+
+The case that started this now lands correctly: "bagaimana cuaca hari ini"
+used to fall into the flat generic pool; it now matches the QUESTION shape.
+
+27 checks, hardest on the property carried over from v0.2b.94: a turn that
+finishes before the delay must still never produce a message, whichever pool
+it would have used.
+
+**1,158 checks across 52 suites.**
+
 ## v0.2b.94 -- one word before the wait, only when there is one
 
 Conceived while planning a desktop companion and a physical voice speaker: a

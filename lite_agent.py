@@ -169,30 +169,67 @@ WRITE_WARN_MINUTES = int(os.environ.get("WRITE_WARN_MINUTES", "5"))
 # only has to prove the bot is still there.
 ACK_DELAY_SECONDS = int(os.environ.get("ACK_DELAY_SECONDS", "5"))
 
-# Generic on purpose -- see the module note above this block. Never names a
-# task ("checking the server"), because at the moment this fires the model
-# has not chosen one yet.
-_ACK_PHRASES = (
+# Three pools, not one -- picked by a cheap keyword match against the raw
+# message, never by asking a model (that would need a real call, undoing the
+# whole point: instant, free, no latency added). None of them name a SPECIFIC
+# task ("restarting node pm5"), because at the moment this fires the model has
+# not chosen one yet -- only which FLAVOR of task it looks like from the words
+# used.
+_ACK_PHRASES_ACTION = (
+    ("Okay, on it\u2026", "Oke, aku kerjakan dulu ya\u2026"),
+    ("Got it, checking now\u2026", "Siap, aku cek dulu ya\u2026"),
+    ("Alright, working on it\u2026", "Baik, lagi dikerjakan\u2026"),
+)
+_ACK_PHRASES_QUESTION = (
+    ("Hmm, let me think\u2026", "Hmm, aku pikir dulu ya\u2026"),
+    ("Good question, one sec\u2026", "Pertanyaan bagus, sebentar\u2026"),
+    ("Let me look into that\u2026", "Aku cari tahu dulu ya\u2026"),
+)
+_ACK_PHRASES_GENERIC = (
     ("Okay, one sec\u2026", "Oke, sebentar ya\u2026"),
-    ("Hmm, let me think\u2026", "Hmm, bentar, aku pikir dulu\u2026"),
-    ("Got it, working on it\u2026", "Siap, lagi dikerjakan\u2026"),
     ("One moment\u2026", "Sebentar ya\u2026"),
+    ("Got it, working on it\u2026", "Siap, lagi dikerjakan\u2026"),
 )
 
+# Checked in this order -- ACTION first, because a message can easily contain
+# both a question word AND an action word ("bisa restart servernya?"), and an
+# instruction dressed as a question is still an instruction.
+_ACK_ACTION_RE = re.compile(
+    r"\b(restart|reboot|matikan|nyalakan|shutdown|hidupkan|install|pasang|"
+    r"deploy|backup|hapus|delete|remove|update|upgrade|jalankan|stop|"
+    r"start|create|buat|tambah|add|ssh|server|proxmox|vm\b|cluster|"
+    r"cek\s|check\s|status)", re.I)
+_ACK_QUESTION_RE = re.compile(
+    r"^\s*(apa|apakah|gimana|bagaimana|kenapa|mengapa|kapan|berapa|siapa|"
+    r"dimana|di\s*mana|what|why|how|when|where|who|is\s|are\s|does\s|"
+    r"do\s|can\s|could\s)\b|\?\s*$", re.I)
 
-async def _send_delayed_ack(update: Update, lang: str) -> None:
-    """One generic acknowledgment, sent ONCE, only if the turn is still
-    running after ACK_DELAY_SECONDS -- a fast reply never sees this at all,
-    because the task is cancelled before asyncio.sleep() below ever returns.
 
-    Never edited or deleted afterwards: it stays as an ordinary chat message,
-    the way a person saying "one sec" stays in the conversation rather than
-    vanishing once they actually answer."""
+def _ack_pool_for(text: str):
+    """Which flavor of "still here" line fits this message best -- guessed
+    from a couple of cheap regexes over the raw text, nothing more."""
+    if _ACK_ACTION_RE.search(text or ""):
+        return _ACK_PHRASES_ACTION
+    if _ACK_QUESTION_RE.search((text or "").strip()):
+        return _ACK_PHRASES_QUESTION
+    return _ACK_PHRASES_GENERIC
+
+
+async def _send_delayed_ack(update: Update, lang: str, text: str) -> None:
+    """One acknowledgment, sent ONCE, only if the turn is still running after
+    ACK_DELAY_SECONDS -- a fast reply never sees this at all, because the task
+    is cancelled before asyncio.sleep() below ever returns.
+
+    Its flavor is picked from the message's own wording (_ack_pool_for), never
+    from asking a model -- that would need a real call and undo the point of
+    this being instant and free. Never edited or deleted afterwards: it stays
+    as an ordinary chat message, the way a person's "one sec" stays in the
+    conversation rather than vanishing once they actually answer."""
     await asyncio.sleep(ACK_DELAY_SECONDS)
     target = _msg(update)
     if target is None:
         return
-    en, id_ = random.choice(_ACK_PHRASES)
+    en, id_ = random.choice(_ack_pool_for(text))
     try:
         await target.reply_text(_t(lang, en, id_))
     except Exception:
@@ -11115,7 +11152,7 @@ async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     beat = asyncio.create_task(_progress_heartbeat(
         context, update.effective_chat.id, lang, started,
         _effective_unlock_cap(update)))
-    ack = asyncio.create_task(_send_delayed_ack(update, lang))
+    ack = asyncio.create_task(_send_delayed_ack(update, lang, text))
     try:
         # run_combo shells out to agy/claude and blocks for minutes at a time
         # -- one live turn was measured at 4m35s. Called directly, as it was
