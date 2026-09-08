@@ -33,13 +33,15 @@ model_overrides.json
 chat_language.json
 gdrive_room_accounts.json
 gdrive_oauth_client.json
-.lite-agent.service.bak
+gdrive_oauth_client_desktop.json
+.*.service.bak
 /incoming/
 /bin/
 update_state.json
 update_announce.json
 spend.jsonl
 /memory/
+/chatscope/
 OWNER_SCOPE.md
 *.log
 tools/registry.json
@@ -47,3 +49,10 @@ tools/registry.json
 # Symbol index when the operator notes folder is not reachable on this
 # machine (the Linux host). Generated on every full test run.
 /dev/index/
+
+# Konteks lokal operator -- ikut lewat Google Drive, bukan git.
+# Sengaja tidak di-commit: isinya konteks UIN/Bimajaya yang tidak boleh
+# ikut kalau repo ini di-PR ke upstream.
+CLAUDE.md
+HANDOVER-*.md
+gdrive_dest.json

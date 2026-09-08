@@ -195,6 +195,27 @@ check("the state is read from sshd itself, not from the config file",
 check("the advice only appears when the host really still allows passwords",
       "if still_open:" in src2)
 
+# --- exempting a host from the advice, a HARD boundary ----------------------
+# A decision already made and final (see CLAUDE.md's "Keputusan tetap": a
+# production box whose dev team depends on password SSH staying open) must
+# not get relitigated by a bot nagging about it every time that host is
+# re-registered. Advice-only, so nothing is at stake but the noise -- but
+# noise is exactly how a REAL warning elsewhere gets tuned out too.
+check("SSH_HARDEN_EXEMPT_HOSTS is empty when unset (nothing in this test's env)",
+      mod.SSH_HARDEN_EXEMPT_HOSTS == set())
+check("...and parses comma-separated, case-insensitive, same shape as "
+      "ALLOWED_GROUP_IDS -- not a one-off pattern",
+      {h.strip().lower() for h in "SrvBJ3, 10.0.0.5 ,".split(",") if h.strip()}
+      == {"srvbj3", "10.0.0.5"})
+
+src3 = Path(SRC).read_text(encoding="utf-8")
+check("an exempt host skips the sshd check entirely, not just the message",
+      'data["host"].lower() in SSH_HARDEN_EXEMPT_HOSTS' in src3)
+gate2 = src3.index('data["host"].lower() in SSH_HARDEN_EXEMPT_HOSTS')
+check("...checked BEFORE password_auth_state ever runs, so an exempt host "
+      "costs no SSH round-trip either",
+      gate2 < src3.index('password_auth_state, data["host"]'))
+
 failed = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed")
 if failed:

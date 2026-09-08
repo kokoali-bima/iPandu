@@ -160,6 +160,25 @@ async def delete_case():
 
 asyncio.run(delete_case())
 
+
+# --- the suppression has to speak the language the room speaks --------------
+# `\W*$` allows nothing word-shaped between the keyword and the address, which
+# is right for "gateway 10.17.17.1" and wrong for how half this deployment
+# writes: Indonesian attaches the possessive clitic -nya. "dns nya 8.8.8.8"
+# offered to register a nameserver. Allowing that one clitic only ever
+# suppresses more, never less.
+for phrase in ("dns nya 8.8.8.8 ya", "dnsnya 8.8.8.8", "dns-nya 8.8.8.8",
+               "gateway-nya 10.17.17.1", "gatewaynya 10.17.17.1"):
+    check(f"not a host to register: {phrase!r}",
+          mod.unregistered_hosts_in(phrase) == [])
+
+# The other direction, which is the half that would make this a bad change:
+# -nya on an unrelated word must not suppress a genuine unknown host.
+check("a real unknown host is still detected when -nya appears elsewhere",
+      mod.unregistered_hosts_in("server barunya 192.0.2.11") == ["192.0.2.11"])
+check("...and with no keyword at all", 
+      mod.unregistered_hosts_in("perbaiki aplikasi di 192.0.2.10") == ["192.0.2.10"])
+
 failed = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed")
 if failed:

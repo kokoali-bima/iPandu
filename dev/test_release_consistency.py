@@ -108,9 +108,19 @@ else:
     ok_tag, _ = git("rev-parse", "--verify", f"refs/tags/v{declared}")
 
     notes_are_committed = bool(declared) and committed_declared == declared
-    check(f"release notes for v{declared} are tagged, or not yet committed "
-          f"(committed={notes_are_committed}, tag={ok_tag})",
-          ok_tag or not notes_are_committed)
+    ok_branch, branch_name = git("rev-parse", "--abbrev-ref", "HEAD")
+    on_master = ok_branch and branch_name.strip() == "master"
+    # A release commit needs its tag -- but only once it is actually ON
+    # master. A PR proposing the same version bump cannot carry the tag
+    # too: the tag has to point at the real master merge commit, which
+    # does not exist until the PR lands. Enforced by branch name, not by
+    # 'HEAD == origin/master', which is false at the one moment this most
+    # needs to fire: locally, on master, about to push the commit that
+    # will BECOME the new tip.
+    check(f"release notes for v{declared} are tagged, or not on master yet "
+          f"(committed={notes_are_committed}, tag={ok_tag}, "
+          f"branch={branch_name.strip() if ok_branch else '?'})",
+          ok_tag or not notes_are_committed or not on_master)
 
     # The bot reports git describe verbatim, so this is literally what an
     # operator sees after /update.

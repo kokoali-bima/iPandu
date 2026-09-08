@@ -1,5 +1,839 @@
 # Changelog
 
+## v0.2b.97 -- /setbrief replaces the role instead of stacking it
+
+Found on the live ops deployment, in its own brief. `set_brief_role()` patched
+the opening line with `^(.*?assistant for )(.+?)(\.)`. That pattern stops at
+the FIRST full stop, and it has to: the template's prose continues on the same
+line ("...assistant for X. You are helpful, knowledgeable, and direct.").
+
+Which is fine while the role is what this command is documented for -- "a
+7-node Proxmox cluster". Give it a role containing full stops and only
+sentence one of the previous role is replaced; sentences two onward stay. Every
+edit leaves another layer. Three edits in, the real file's opening line held
+"Lingkup kerja" three times, "Untuk riset" three times, and the template's own
+"You are helpful," stranded in the middle of them. Nothing failed, nothing
+logged -- the model just paid for 19KB of duplicates on every conversation.
+
+The opening line is now REBUILT from the template rather than patched:
+
+    You are {a|an} {scope} assistant for {role}.{the template's own tail}
+
+Idempotent whatever the role contains, and it repairs an already-duplicated
+line on the next run rather than needing a separate command. The scope set by
+/setscope is preserved, the article follows it, and everything below line one
+-- hard boundaries, learned zone -- is untouched.
+
+The cost, stated because it is real: a hand-edited tail on that first line goes
+back to the template's wording.
+
+Two smaller things found while writing the tests:
+
+  The placeholder branch RETURNED EARLY, so a half-filled brief -- opening
+  sentence set, `## Environment:` still on the placeholder, or the reverse --
+  skipped the rebuild entirely. Both now run.
+
+  `_BRIEF_ENV_RE.sub()` took a replacement STRING, in which `` and `\g<0>`
+  are group references. A role containing a Windows path or a backslash would
+  have been corrupted or raised. It takes a function now, and a role full of
+  backreferences is asserted to survive literally.
+
+28 checks in `dev/test_setbrief_idempotent.py`. 1624/1626 across 63 suites.
+
+## v0.2b.97 -- merge v0.2b.91-93, where both sides had fixed the same two things
+
+The first merge in this fork where upstream and this branch had repaired the
+same code from opposite directions. Both sides are kept, because they are
+complementary rather than duplicate:
+
+  new-host card    ours remembers an address the room already dismissed;
+                   theirs skips addresses that are not machines at all --
+                   CIDR, last octet 0/255, introduced by gateway/DNS/subnet.
+  password guard   ours stops an ordinary question firing it;
+                   theirs stops the message being deleted without consent,
+                   and lets the turn run.
+
+Git auto-merged both functions without complaint, which is the part worth
+checking rather than trusting: ours turned out to live at the CALL SITE and in
+a shape test at the end of `mentions_password()`, so neither collided. Verified
+by behaviour against this fleet's real text, not only by the suites.
+
+Two textual conflicts, both "keep both": the `ssh_failure_hint` block and
+`find_vm_target` are ours, `_safe_edit` is theirs.
+
+### Three collisions the merge created
+
+* **Six direct `query.edit_message_text` calls** in the Drive folder picker.
+  It was written after upstream swept every callback edit into `_safe_edit`,
+  so `test_safe_edit.py` caught it immediately. Routed through the helper.
+* **`test_server_autoregister.py` matched the literal `CAPABILITIES_BRIEF`**
+  where this fork injects `capabilities_brief()` -- the function that appends
+  what the deployment actually has. Behaviour checked first (both models still
+  receive it, via `_run_claude_once` and `_build_agy_prompt`), then the
+  assertion widened to accept either spelling.
+* **The brief went over its ~800-token cap.** Upstream now spends 786 of it,
+  and the correct upload marker is inherently longer than the wrong one it
+  replaced. The ceiling stayed: the pinned-folder rule moved into
+  `GDRIVE_PIN_BRIEF`, appended only where a room has actually pinned one --
+  the conditional shape `OPNSENSE_BRIEF` already uses. 791/800 now, and a
+  deployment that never pins pays nothing for it.
+
+### And one upstream heuristic that does not speak this fleet's language
+
+`_NOT_A_HOST_BEFORE` allows nothing word-shaped between the keyword and the
+address. Right for "gateway 10.17.17.1"; wrong for "dns nya 8.8.8.8", because
+Indonesian attaches the possessive clitic -nya -- so the card offered to
+register a nameserver. That one clitic is now allowed, which can only ever
+suppress more; "server barunya 192.0.2.11" is still detected, and asserted.
+
+1587/1589 across 62 suites.
+
+## v0.2b.97 -- a pinned folder keeps the folders you already made
+
+Pinning dropped every directory the model wrote. That stopped the invention it
+was aimed at and also flattened a structure the operator had built by hand: a
+real Drive folder holds "BACKUP OPNSENSE" and "Laporan", and backups and
+reports were landing together in the parent.
+
+Existence is the right test, not absence. A directory the model names is kept
+if it is really there, and the walk stops at the first miss. **Nothing is ever
+created**, so an invented folder now costs nothing -- the file lands in the
+pinned folder, which is where it would have gone anyway.
+
+Matching ignores case but uses the name stored in Drive. A brief saying
+"backup opnsense" has to reach "BACKUP OPNSENSE": Google Drive will happily
+hold two folders differing only in case, which is one more way to end up with
+a tree nobody meant. Capped at three levels, so a pathological path cannot
+spend an rclone call per segment, and a listing that fails assumes nothing --
+guessing "it probably exists" is how a folder gets created.
+
+### The brief documented a marker that parses to nothing
+
+`CAPABILITIES_BRIEF` taught `GDRIVE: <file> -> <folder/name>`. `extract_gdrive()`
+has always required `file=` and `to=`, so an arrow produced no upload, no
+error and no log line. Every other brief in the repo -- SOUL, GEMINI,
+bootstrap, README -- had it right.
+
+It survived because it is subtle: `GDRIVE_MOVE` really does take an arrow, and
+the three markers read as a set, so the arrow spread onto the one that rejects
+it. Both directions are asserted now: the documented form parses, the old one
+does not.
+
+Fixing it pushed the brief past the ~800-token cap `test_capabilities_brief.py`
+enforces -- paid once per conversation on BOTH CLIs. The ceiling stayed and the
+prose shrank; the archaeology moved into a comment above the constant, where it
+costs nothing at runtime.
+
+71 checks in `dev/test_gdrive_folder_picker.py`. 1498/1500 across 59 suites.
+
+## v0.2b.97 -- pin the Drive folder by browsing to it
+
+The folder after the arrow in `GDRIVE: <file> -> <folder/name>` is written by
+the MODEL, freshly each turn. Reported from a live room: the same weekly report
+landed in "Laporan", then "laporan/september", then "Reports/2026". Nothing ever
+errored -- rclone creates whatever it is given -- so it just scattered, and the
+file had to be hunted for each time.
+
+`/gdrivefolder` walks the real tree instead: My Drive or any shared drive, then
+folder by folder, then "use this one". Pinning changes two things, and both are
+the point. The model's directories are dropped and only its filename survives --
+honouring them would reopen the same hole one level down. And the group-name
+subfolder is not added either: somebody who browsed to a folder meant that
+folder, not a child of it. `/gdrivefolder off` puts it back.
+
+Four things that would have bitten later:
+
+  Telegram caps `callback_data` at 64 bytes and a Drive path routinely exceeds
+  it, so the buttons carry an index and the position is held bot-side.
+
+  `team_drive` is per-ACCOUNT rclone config, not per-room. A second room
+  pinning a different shared drive on the same account moves the root under the
+  first one, whose next upload would land in the wrong drive at the same folder
+  name -- the exact failure this removes. The upload path re-asserts it.
+
+  The pin carries the ACCOUNT too. Browsing happened inside one; honouring the
+  room's default account instead could aim the upload at a same-named folder
+  somewhere else.
+
+  Delete and move stay fenced inside GDRIVE_ROOT by `_gdrive_safe_path()`.
+  Writing into a folder the operator already keeps things in is additive;
+  deleting from it is not.
+
+Two of my own mistakes, caught by suites already here: a `write_text()` on
+Windows rewrote all of `lite_agent.py` with CRLF (`read_text` translates on the
+way in, `write_text` on the way out), and the new `/help` line went in after
+`/gdrivetarget` when `f` sorts before `s`.
+
+48 checks in `dev/test_gdrive_folder_picker.py`. 1475/1477 across 59 suites.
+
+## v0.2b.97 -- snapshots: the right guest, the right node, the right tool
+
+The operator's standing rule is "always snapshot before changing a VM". The bot
+offered to, and failed every time with:
+
+    bash: line 1: qm: command not found
+
+True, and beside the point. Four faults stacked, each hiding the next.
+
+**The id was never a VM id.** `_VMID_RE` accepted two digits, so "VM 20" -- a
+port, a size, a percentage -- became a snapshot target. Proxmox ids start at
+100, and it answered `vmid: invalid format` three times. The pattern now takes
+three to nine digits and `guess_vmid()` skips anything under 100; `take_snapshot()`
+checks before it opens a single connection, and says what is wrong with the
+number instead of relaying a message about a number the operator never chose.
+
+**Only the last error survived.** The loop rebound `err` each time round, so
+the final host's message was the whole diagnosis. Every host's first error line
+is reported now.
+
+**The final host was a backup server.** `_snapshot_hosts()` offered every
+registered machine. PBS accepts the ssh, runs the command and has no `qm` --
+it can never succeed, and it overwrote three copies of the real error with a
+shell message about a missing binary. Hypervisors only now.
+
+**The node hint was dead.** `find_vm_node()` returned a name ("node2") and
+`_snapshot_hosts()` compared it against addresses, so it never matched and
+snapshots started at whichever node came first in `servers.json`. Replaced by
+`find_vm_target()`, which returns node, address and type in one ssh -- the
+second `pvesh` call maps names to addresses.
+
+And a fifth, found on the way: a container needs `pct snapshot`, not `qm`. The
+type now comes from `/cluster/resources` rather than being assumed.
+
+41 checks in `dev/test_snapshot_target.py`.
+
+## v0.2b.97 -- two OAuth clients, because Google binds the grant to the type
+
+The previous entry said the manual path could reuse the operator's stored
+OAuth client. It cannot, and the live attempt said so:
+
+    Access blocked: <app> request is invalid
+    Error 400: invalid_request
+
+Google ties the grant type to the CLIENT type. The device flow needs a
+*TV and Limited Input devices* client; `rclone authorize` uses a loopback
+redirect and needs a *Desktop app* one. A TV client supports no redirect at
+all, so the loopback path is refused before the consent screen is drawn.
+
+So there are two clients now, in two files, with no fallback between them --
+falling back would turn a clear "not set up yet" into that same 400.
+`/connectgdrive setupclient desktop` stores the second one; the card explains
+it is the same Google Cloud project, so the Drive API and consent screen do not
+have to be set up twice. Supplying it leads straight to the
+`rclone authorize` instructions rather than a device flow it cannot serve.
+
+`gdrive_oauth_client_desktop.json` was added to `.gitignore` in the same
+change. Its sibling was already there, and this one holds a credential too.
+
+## v0.2b.97 -- the manual Drive path can reach a shared drive, and survive 2026
+
+Correcting something this CHANGELOG implied one entry ago. `drive.file` does
+not merely limit what a shared drive shows — it cannot touch one **at all**:
+
+    ERROR: failed to get Shared Drive info: googleapi: Error 403:
+    Request had insufficient authentication scopes
+    method: google.apps.drive.v3.DriveDrives.Get
+
+rclone resolves `team_drive` through `Drives.Get`, which Google refuses under
+`drive.file`. Setting a shared drive on such a remote does not restrict it, it
+**breaks** it — My Drive uploads included — until `team_drive` is cleared.
+
+Reaching a shared drive therefore needs a full `drive` token, and Google's
+device flow will not issue one: of the Drive scopes it supports, only
+`drive.appdata` and `drive.file` are on the list. That is what
+`/connectgdrive manual` has always been for. But it hardcoded `drive.file` and
+attached no OAuth client, so it could not do the job it existed for, and put
+the account back on rclone's shared client — the very thing being retired in
+2026, and already failing uploads on exhausted quota.
+
+Now:
+
+- `connect_gdrive_account()` takes a `scope`, still defaulting to `drive.file`.
+  Stating it is the caller's job: writing a scope the token does not carry does
+  not widen it, it makes the remote lie about itself.
+- The manual path asks for `drive` and attaches the operator's stored OAuth
+  client.
+- It may attach it because it now knows: `_gdrive_authorize_command()` prints
+  the `rclone authorize` line, and when a client is stored that line carries
+  it. The token that comes back was issued by that client because the bot said
+  so. When none is stored, nothing is attached and the instructions warn about
+  the shared client instead, naming `/connectgdrive setupclient`.
+
+A refresh token is bound to its issuing client, so attaching the wrong one
+breaks an account immediately rather than postponing anything. Two existing
+suites guarded that, and both had to be updated rather than loosened:
+`test_gdrive_client_id.py` asserted exactly ONE call site may pass a client —
+the real rule is "only a site that knows the issuer", which is now two, with
+the rclone-authorize path still correctly passing none; and
+`test_gdrive_device_flow.py` asserted the literal `scope=drive.file` appears in
+the source, which moved into a default, so it now checks the default and that
+the device-flow call site does not override it.
+
+## v0.2b.97 -- /gdrivetarget: a shared drive is a different root
+
+A report was sent "to the shared drive TIPD". The remote had no `team_drive`,
+so rclone was working in the account's My Drive the whole time — and rclone
+models a shared drive as a different ROOT, not a longer path, so no destination
+the operator types can reach one. The upload would have reported success and
+the folder they were watching would have stayed empty. On the day a quota error
+masked it, which is the only reason it was noticed at all.
+
+`/gdrivetarget` shows where the room's Drive account currently writes, lists
+the shared drives it can see, and points it at one — or back at My Drive with
+`/gdrivetarget mydrive`. `/gdrive` picks WHICH account; this picks WHERE inside
+it.
+
+Three things it refuses to guess about:
+
+- `set_gdrive_target()` goes through `rclone config update`, never a hand-edit.
+  rclone owns that file's format and every other stanza in it is somebody's
+  working credential — the same reasoning as `connect_gdrive_account()`.
+- It **lists the new root before reporting success**. A setting that saved but
+  cannot be reached is the same silent-success failure one step further along.
+- Listing shared drives needs more than the `drive.file` scope the device flow
+  issues — `drive.file` only ever sees what the bot itself created, which a
+  shared drive somebody else made is not. That refusal is reported as exactly
+  that, with both ways out: paste the id from the browser URL, which still
+  works, or reconnect with a full drive token. Reporting it as "no shared
+  drives found" would send the operator into Google's sharing settings looking
+  for a problem that is in the token.
+
+Also of note, from the same incident: the destination folder was named
+`Laporan SERVER / INFRA`. rclone reads `/` as a path separator, so that is two
+nested folders with trailing and leading spaces, not one folder with a slash in
+its name. Nothing in the tooling can express the latter.
+
+## v0.2b.97 -- OPNsense, with writes tied to /unlock
+
+`tools/opn` calls an OPNsense API on behalf of the agent. One key does both
+reading and writing, by the operator's choice, and that choice is right:
+OPNsense grants privileges per PAGE rather than per verb, so a key that can
+read the firewall page can post to it too. A second "read-only" key would be a
+second credential to rotate for a boundary OPNsense cannot enforce.
+
+So the boundary lives in the wrapper:
+
+- **Reads are ungated.** Most of what a firewall gets asked is a read, and
+  making those ask permission is friction with nothing behind it.
+- **Writes require write mode to be open** -- checked against the very file
+  `unlock_write_mode()` writes, expiry included. Not a copy of the rule, the
+  rule itself: when the window lapses, writes stop. The refusal names `/unlock`
+  and says reads still work, so nobody unlocks merely to look.
+- **No write without a rollback point.** Before the first change of each
+  window the running config is downloaded to `opnsense-backups/`; if that
+  download fails, the change does not happen. Same reasoning as
+  `take_snapshot()`: the agent cannot be relied on to create a rollback point
+  for a change it has not decided to make yet, so the wrapper does it first.
+  Paired with OPNsense's own configuration history, a bad change is one revert
+  away -- and rollback, not prevention, is the honest protection here.
+
+It also raises the on-demand VPN when the firewall sits behind one. `curl` does
+not go through ssh, so the ProxyCommand never fires for an API call; without
+this the first request after an idle shutdown fails with a routing error that
+reads like the firewall being down.
+
+Stated rather than glossed: this is not a wall. The agent runs as the same
+Linux user and could curl the key directly, exactly as it could use
+`~/.ssh/agent_write` directly today. The wrapper marks intent, stops accidents,
+keeps a log, and guarantees the rollback point.
+
+One bug from the first cut of this, kept here because the test lesson is worth
+more than the fix: `base_url` was cleaned with `tr -d '\r\n/'`, meaning to drop
+a trailing slash. `tr -d` deletes *every* match, so `https://host:1945` became
+`https:host:1945` — curl produced nothing at all under `-s`, and the host
+extraction cut at the first colon and tried to route to "https". The test
+passed anyway, because it asserted the log contained `host:1945/api/...`, which
+a mangled scheme still satisfies. It now asserts the whole URL, and there are
+cases for a trailing slash and for a `base_url` with no scheme at all.
+
+The brief the model receives is now built by `capabilities_brief()`, which adds
+the OPNsense section only where the credentials actually exist. A deployment
+without them is not told about a tool it cannot use -- otherwise the model
+offers it, the operator asks for it, and the failure arrives several turns
+later as a confusing error instead of a straight "not set up here".
+
+## v0.2b.97 -- /update could not restart itself, and said it had
+
+The sudoers rule `newagent.sh` writes did not match the command the bot runs.
+
+    rule:  /usr/bin/systemctl            restart <unit>
+    call:  sudo -n systemctl --no-block  restart <unit>
+
+sudoers matches the argument vector literally, so those are two different
+commands. `/update` pulled the new code, logged "UPDATE applied … restarting",
+got `sudo: a password is required`, and left the old process running. It
+reported success, because the restart goes out through `Popen` and nothing
+waits on it.
+
+Python had already imported the module, so the checkout moved and the behaviour
+did not. On this deployment that happened twice in a row -- two fixes shipped,
+neither took effect, and the second was being debugged against a process
+running code from the previous day. `--no-block` itself is right and stays: the
+unit being restarted is the caller, so waiting on it is not an option.
+
+The rule now lists the `--no-block` form first, and keeps the plain one -- the
+same privilege either way, restart this one unit.
+
+The durable half is the test. `dev/test_newagent.py` now reads the call sites
+out of `lite_agent.py` and asserts the generated grant covers exactly what they
+run, so the rule and the command cannot drift apart in silence again. It found
+a third call site immediately -- `sudo -n systemctl daemon-reload` -- which is
+deliberately NOT granted, since it is only reachable through the `cp` into
+/etc/systemd/system that this script refuses on purpose. That one is skipped
+rather than covered: a test that demanded coverage for every sudo call would be
+an argument for widening the grant, which is the opposite of its job.
+
+## v0.2b.97 -- /addserver names the layer that failed, and both keys
+
+`/addserver` against a Proxmox node returned:
+
+    ssh: connect to host 10.10.95.3 port 22: Network is unreachable
+
+    Usually the public key isn't in place yet, or the user/port is off.
+
+Wrong in the most expensive way available. "Network is unreachable" is a
+routing failure -- the key was never offered -- but the message blamed the key,
+so the operator reinstalled it, failed again, and asked whether the bot's key
+differed from the one they had been handed. Nothing about a key was ever
+involved: the host sat behind a VPN whose subnet was not routed.
+
+`ssh_failure_hint()` reads the error text instead of guessing over it, and
+distinguishes routing, a timeout, a refused port, a name that will not resolve,
+and a changed host key. Only when none of those match -- a publickey refusal,
+or something new -- does the message talk about keys at all.
+
+And when it does, it now shows them. Both. `bootstrap_key_block()` prints the
+key the connection test actually presents -- `agent_keypair()`, which is the
+READ-ONLY key whenever write mode is set up -- alongside the write key that
+`install_node_guard()` needs before it can install the guarded one. Authorising
+only one leaves `/addserver` stuck at whichever step wanted the other, and the
+bot previously named neither, so the operator had to go and find them on the
+box. The same round-trip this entry is about started exactly there.
+
+## v0.2b.97 -- the read-only guard replaces a hand-installed key
+
+`/addserver` against a UIN host at `172.16.10.76` reported:
+
+    verification failed: the read-only key can still WRITE -- the guard is
+    not in force. This node is unprotected.
+
+That host's `authorized_keys` held the agent's read-only key, pasted there by
+hand while the machine was being prepared:
+
+    ssh-ed25519 AAAA...KPw7j68... ismart-la-readonly
+
+No `command=`. `install_node_guard()` asked only whether the key was PRESENT,
+found it, and skipped adding the guarded line -- then reported success. The
+node was left authorising the read-only key as ordinary unrestricted root:
+precisely the configuration the guard exists to prevent, reached by a road
+nobody had walked.
+
+`verify_node_guard()` caught it, which is why nothing was lost and why that
+function is not belt-and-braces. But the operator could not finish
+`/addserver`, and every machine prepared by hand before registration was
+queued up to fail the same way -- two Bimajaya application VMs among them.
+
+So the check now asks the right question: is there a line carrying this key
+AND the guard options? If not, every line carrying that key is dropped and the
+guarded one written in its place. `grep -vF`, not `sed`: base64 can contain
+`/`, and no sed delimiter is safe for every possible key blob. Rewriting
+unconditionally is still idempotent in content -- a second run lands the same
+file, which is what makes `/secure` safe to re-run -- and it heals a
+hand-pasted key rather than trusting it. The pre-iSmart file is copied to
+`authorized_keys.ismart-bak` once and never overwritten afterwards, and
+`test -s` refuses to install an empty authorized_keys before the overwrite,
+because this is the file that decides whether anyone can still log in.
+
+`dev/test_node_guard.py` gains a section that RUNS the generated script against
+a real fixture instead of matching its text: a hand-prepared host carrying the
+unrestricted key, an unrelated admin key, and the write key. It asserts that no
+*unguarded* line survives -- stated that way on purpose, because the fixture
+starts with exactly one such line, so a count-based check passes when the
+script does nothing at all, which is the failure being tested for. The old
+presence-only check is executed too and asserted to leave the host open, so the
+fix cannot be quietly simplified back later.
+
+Two things that suite got wrong, found while writing that: it set `HOME` but
+not `USERPROFILE`, and `Path.home()` reads the latter on Windows -- so it
+generated real keypairs into the developer's own `~/.ssh`, then failed on the
+next run because its own litter was still sitting there. And its mock answered
+the install call but not `_admin_key_for()`'s probe, so `install_node_guard()`
+returned early, the captured script was `""`, and running an empty script
+looked exactly like a broken guard.
+
+## v0.2b.97 -- newagent.sh: another deployment, in one command
+
+The last piece of the split this series is about. `install.sh` sets up ONE
+deployment and already says what the second one needs:
+
+    "For most setups, create a dedicated non-root user first and re-run as
+     that user."
+
+So this automates exactly that, and nothing more: create the user, clone,
+grant the one sudo right `/update` depends on, hand over to `install.sh`.
+
+**Deliberately a script and not a Telegram command**, which is the same
+argument `/addmcp` and `/addserver` settle the other way. Adding an agent means
+creating a Linux user with shell access, its own `~/.ssh`, and its own
+subscription logins -- strictly larger than anything the bot gates behind a PIN
+today. A decision that size belongs where a human already has root.
+
+**The sudo grant is the whole security argument, and it is narrower than the
+obvious version.** `/update` ends with `sudo -n systemctl restart <service>`,
+and without it the bot updates itself and never comes back -- so exactly that
+command is granted, for exactly that unit. `refresh_systemd_unit()` also wants
+`sudo -n cp <tmp> /etc/systemd/system/<unit>`, and that is refused: granting it
+would let the service user rewrite its own unit with `User=root` and take the
+host on the next restart, which would make every deployment on the box
+root-equivalent and reduce the per-user isolation to decoration. The cost of
+refusing is a convenience, not correctness -- that write is already best-effort
+in the code, logging `could not write the unit (needs sudo)` and carrying on
+without restarting, so nothing loops. Refreshing the unit after a release that
+changes the template becomes an operator action, and the README says so.
+
+The broad rights `install.sh` genuinely needs (apt, writing the unit the first
+time) are granted in a separate sudoers file removed by a `trap ... EXIT INT
+TERM` -- Ctrl-C and a failed install included. Temporary rights that can outlive
+the thing that needed them are not temporary.
+
+Details that each close a way this could go wrong:
+
+- **The name is validated, not quoted.** It becomes a username, a directory and
+  a unit name at once, so `../etc`, `x;rm -rf /`, spaces, uppercase and
+  non-ascii are refused outright. Nothing there is made safe by escaping.
+- **Validated BEFORE the root check**, found by running it rather than reading
+  it: with the checks the other way round a mistyped name sent you to find sudo
+  first, only to be turned away again for a different reason once you had it.
+- **It refuses an existing user, directory or unit.** An existing deployment
+  holds a PIN hash, sessions, SSH keys and connected Drive accounts, and
+  "provision" must never be able to mean "destroy those".
+- `install.sh` runs AS the new user, not as root -- run as root the service
+  would run as root too, and share the very `$HOME` this exists to separate.
+- The generated sudoers files are checked with `visudo -c`, and an invalid one
+  is removed rather than left in `/etc/sudoers.d` where it can break `sudo`
+  for everyone.
+
+New: `dev/test_newagent.py`, 38 tests. Runs the script as a real subprocess
+(never with root, so every path it exercises refuses before reaching anything
+privileged) for the validation half, and reads the generated sudoers rules for
+the grant half -- asserting the permanent one contains `systemctl restart` and
+does NOT contain `cp`, `/etc/systemd/system`, `daemon-reload` or a blanket
+`ALL`. Those exist to stop the grant being widened later by someone reasonably
+trying to silence that log line. **0/1 against the pre-change source.**
+
+Full suite: **789/791 across 37 suites** on this Windows dev box; the two
+failures and four skips are the long-standing Windows-only artifacts, confirmed
+pre-existing. **Not run on Linux**, and this one is entirely a Linux script:
+the validation and refusal paths are exercised here, but no user was created,
+no sudoers file written and no unit installed. That half needs a real host.
+
+
+## v0.2b.97 -- Drive keeps refreshing after rclone's shared client retires
+
+Google has begun charging for API requests made through rclone's built-in
+shared OAuth client, and shared usage is far over the free quota, so rclone is
+retiring it during 2026 after a 90-day notice. Asked here as "should we replace
+rclone with the Drive API directly, since this method dies in 2026?"
+
+**It should not, and that would not have helped.** What is retiring is rclone's
+shared *client_id*, not rclone and not the way Drive is reached. Any OAuth app
+needs a client of its own -- Google requires one whichever library moves the
+bytes -- so the deadline forces exactly the same action either way, and a
+rewrite would only add work on top of it: Drive has no paths (every operation
+resolves file IDs by parent, and duplicate sibling names are legal), plus
+resumable uploads, the permissions API for share links, refresh handling and
+backoff. This project has exactly one dependency today, and since v0.2b.64 it
+fetches its own rclone binary, so the binary was never the friction anyway.
+
+**What the question did surface is a real dated bug, which was not visible from
+outside.** `connect_gdrive_account()` created every remote with only `scope` and
+`token`:
+
+    rclone config create <name> drive scope=drive.file token=<blob>
+
+An access token lasts about an hour. Everything after that is the REFRESH, and
+rclone refreshes using the client_id stored on the remote -- with none stored,
+its own shared one. So even an account connected through the device flow with
+the operator's OWN Google Cloud client (v0.2b.54) was still refreshing through
+rclone's shared client, and would have died with it. The failure shape is the
+worst kind: fine for an hour, then Drive stops, on a deployment nobody touched,
+with nothing in the error pointing at the cause.
+
+The client is now written onto the remote -- but only where its provenance is
+actually known, and that restraint is the whole of the design. **A refresh
+token is bound to the client that issued it**, so attaching the wrong client_id
+does not postpone the breakage, it causes it immediately at the first refresh.
+So `connect_gdrive_account()` takes the client from its caller rather than
+reading it itself, and exactly one of the three call sites passes one:
+
+| path | token issued by | passes a client |
+|---|---|---|
+| device flow | the operator's own stored client | yes -- certain |
+| `rclone authorize` | rclone's shared client | no -- nothing to attach |
+| pasted token | whatever the operator used | no -- unknown |
+
+The last two keep today's behaviour exactly, because there is no honest fix for
+them in code: they have to be RECONNECTED before the retirement. So they are
+made visible instead. `/gdrivestatus` now lists every Drive remote with no
+client_id of its own and says what happens and when -- a green tick there
+otherwise means "works today", right up until it does not.
+
+Also corrected: the README called this a "known limitation" with a one-line
+workaround. It is a dated breakage with two different outcomes depending on how
+each account was connected, and it now says so, including why reconnecting is
+unavoidable rather than an implementation shortcut.
+
+New: `dev/test_gdrive_client_id.py`, 24 tests. Captures the actual argv handed
+to `rclone config create` rather than trusting the source reads right, asserts
+that an unusable or empty client dict writes nothing rather than a blank
+`client_id=`, and walks the AST to assert only one call site passes a client and
+that `connect_gdrive_account()` does not read one itself -- the change that
+would quietly reintroduce the trap. **1/2 against the pre-change source**, with
+a tally rather than a traceback.
+
+**Not verified against a live rclone.** The mechanism (an empty client_id
+falling back to rclone's built-in one) is from rclone's own documentation and
+its config warning, not from a run here, and this dev box has no connected Drive
+account. The argv is asserted; that it produces a remote which refreshes through
+the operator's client should be confirmed on the Linux deployment before the
+notice period starts.
+
+Full suite: **751/753 across 36 suites** on this Windows dev box; the two
+failures and four skips are the long-standing Windows-only artifacts, confirmed
+pre-existing.
+
+
+## v0.2b.97 -- /setchatscope: a different job per room
+
+The second half of the same problem the SERVICE_NAME change below solves the
+first half of. Splitting agents by *risk class* gets you two deployments -- one
+holding SSH keys to production, one that only reads papers and writes code.
+Inside each, the rooms still need different roles: a network-engineering group
+and a Proxmox group are the same risk class and belong on the same install, but
+"what kind of assistant is this" is not the same answer for both.
+
+`/setscope` cannot serve that, deliberately -- it is one setting for the whole
+deployment, and for "what is this bot for" that is right. `/setchatscope`
+overrides the role in the chat it is run in and nowhere else. Gated like
+`/setscope` and `/addserver` (owner anywhere, or a registered group's own admin
+in that group), no PIN: it grants no capability at all. The tools, the machines
+reachable and the boundaries are exactly what they were; only the description of
+the job changes.
+
+**The design decision worth recording is that this is a LAYER, not a per-chat
+copy of the brief** -- and the obvious implementation is the copy. Hard
+boundaries live INSIDE the brief: `write_boundaries()` rewrites the bullet list
+in SOUL.md and GEMINI.md. So a per-chat brief FILE would mean a boundary added
+next week silently never reaching any room that had one, with nothing to say so
+-- a room quietly operating under last month's rules. That is the same shape of
+gap this project has been bitten by three times already (a fix that only lives
+on one path never reaching the installs that take the other).
+
+A layer cannot have it. The shared brief still goes out in full on every turn
+and the room's role is appended after it, stating plainly that it takes
+precedence over the role and that the boundaries above it are never relaxed by
+it -- a contradiction the reader can see being resolved, rather than a promise
+about text that was withheld. Proved rather than asserted: a test adds a
+boundary AFTER a room has its own role and checks the room's very next prompt
+carries it, and checks the same for a room with no role of its own.
+
+The cost is stated rather than hidden: a research room still carries
+infrastructure-brief text it has no use for. That is token overhead, not a hole,
+and a persona that should not even SEE the other's brief wants a separate
+deployment -- which is what the change below is for.
+
+Details that would each have shipped something subtly wrong:
+
+- **Sent on every turn, not only when a conversation opens.** The brief itself
+  is opening-only because re-sending ~2.5k tokens is waste; this is a line or
+  two, and gating it the same way would mean changing a room's role applied to
+  whichever conversation happened to start next rather than the one open now.
+- **Both backends, not just Claude.** agy is the DEFAULT, cheapest tier, so a
+  Claude-only version would have made per-room roles reachable only on the
+  expensive escalation path -- exactly backwards, the same trap v0.2b.52 caught
+  itself in with MCP.
+- **A write with no usable chat id is refused**, not written somewhere shared,
+  which would hand one room's role to every other -- the exact leak v0.2b.49
+  fixed for MEMORY.md. Ids are validated as optionally-negative integers rather
+  than escaped, same rule, and `chatscope/` is chmod 700 beside `memory/` for
+  the same reason both hold one room's private content.
+
+New: `dev/test_chat_scope.py`, 48 tests, behavioural rather than structural --
+the module is loaded against a scratch install, real files are written, and the
+prompt actually handed to agy is read back, with the Claude side checked by
+capturing the argv `_run_claude_once()` builds. Several tests exist only to stop
+the layer quietly becoming a replacement later, since a test that merely checked
+"the role differs per room" would pass under the broken design too.
+
+Verified in both directions. Against the pre-change source it reports **0/6 and
+stops with a readable tally** rather than dying on the first AttributeError --
+fixed after the first run did exactly that, because a detector nobody can read
+in the failing direction is not a detector. One test failure of my own was found
+the same way and was the test's fault, not the code's: it asserted on
+`ast.unparse` output including the docstring, and `_brief_files()`'s docstring
+names `CHAT_SCOPE_DIR` precisely to explain why it does not use it.
+
+**Not included, and worth naming precisely, because the obvious next step turns
+out to be the wrong one:** the learned zone is still global and still capped at
+60 facts for the whole deployment. The tempting follow-up is to make it
+per-room the way MEMORY.md went per-chat in v0.2b.49 -- but the two are not the
+same shape. `LEARN:` lines are already refused from any group
+(`_is_trusted_origin`: a private DM from a named ALLOWED_USER_IDS account), so
+a room cannot poison its own learned zone and there is no cross-room *write* to
+isolate. What the current design actually gives is "the operator teaches it once
+in their DM and every room benefits", and making the zone per-room would break
+exactly that while fixing a leak that cannot occur.
+
+What IS real, and is made more likely by this release rather than less: the
+60-fact cap is now shared between personas that can finally differ, so a busy
+infrastructure week can silently evict the research room's facts. That is a cap
+question, not an isolation one -- addressed below.
+
+### `LEARNED_MAX_FACTS`, and a cap you can see coming
+
+The cap was hardcoded and invisible. Both halves mattered once rooms could
+differ: past 60 the OLDEST fact is dropped with nothing said, so the first sign
+is a fact the agent used to know and now does not.
+
+`LEARNED_MAX_FACTS` is now read from `.env`, and `/learned` reports "N of 60"
+always -- not only once it is close, because a number that appears just as it
+starts mattering is a number nobody has learned to read -- with a warning past
+80% naming both ways out.
+
+**And the tokens, beside the count, because the count is only a proxy.** A fact
+may be 10 or 400 characters, so "52 of 60" and the thing actually being paid
+come apart. It reads `52 of 60 · ~1,358 tokens, re-sent each time a chat starts
+a new conversation` -- the second clause because on a deployment where `/new` is
+used freely (and it should be: v0.2b.62 measured one session reaching 506,250
+input tokens by its 95th turn), the learned zone is not a one-off, it is a floor
+paid again at every fresh conversation. Marked `~` and documented as chars/4:
+a real count needs the model's own tokenizer, which is a dependency this project
+does not carry for one status line.
+
+Printed in full rather than through `_fmt_tok()`, found by rendering it rather
+than trusting it: a full zone lands around 1-2k, and `_fmt_tok`'s
+`{n/1000:.0f}k` shows both 1,358 and 1,560 as "1k" -- collapsing precisely the
+band where the number has to be readable to be worth printing. `/spend` keeps
+`_fmt_tok`, where the magnitudes make it the right call. Raising it is presented as the real trade it is
+rather than a free dial: every fact is re-sent whenever ANY room opens a
+conversation, so the cap is a running cost in every room, and `/forget` on
+facts that no longer hold is often the better answer. Measure first, the order
+`/spend` and `TURN_TOKEN_CEILING` already ask for.
+
+**0 is not "off" here**, deliberately unlike `TURN_TOKEN_CEILING`: this cap is
+what stands between the briefs and unbounded growth, so removing it is the
+dangerous direction, not the permissive one. Anything unparseable, zero or
+negative keeps the default and logs why.
+
+**And the bug that guard nearly shipped with, found by writing the test for
+it.** The parsing was placed beside the constant, some twenty lines ABOVE where
+`logger` is created -- so the only path that calls `logger.warning()` would
+have died on `NameError: name 'logger' is not defined`. Confirmed by
+reconstructing it rather than reasoning about it: with a valid value the module
+imports perfectly, and with `LEARNED_MAX_FACTS=sixty` it does not import at
+all. That is the shape that ships green -- it compiles, so `/update`'s own
+compile-check passes it too, and it breaks only for the operator who typo'd
+their `.env`, by refusing to start. A guard whose sole failure path crashes, in
+exactly the case it exists for, is worse than no guard. Moved below the logger,
+and `dev/test_learned_cap.py` asserts the ordering so it cannot come back --
+verified against the reconstructed bug, where that one test fails and the rest
+pass.
+
+New: `dev/test_learned_cap.py`, 26 tests. Loads the module repeatedly with
+different environment values rather than reading the source for them, so
+"refused" means the constant really came out at the default; enforcement is
+checked by writing five facts under a cap of three and looking at which two
+survived; and the estimate is checked to track CONTENT rather than entry count,
+by comparing one 400-character fact against one short one. **9/14 against the
+pre-change source, with a tally rather than a traceback.**
+
+One test-hygiene lesson turned up three separate times in this branch, so it is
+worth stating plainly rather than as an aside: **a detector must stay READABLE
+in the direction where it fails.** These suites are pointed at a bare scratch
+copy of the module to prove they fire, and each time a new check reached for
+something that copy does not have, the suite died on an AttributeError or a
+missing file instead of reporting -- in the one run that is the entire point of
+writing it. Every section that needs a new symbol now guards for it and exits
+with a tally.
+
+Full suite: **727/729 across 35 suites** on this Windows dev box; the two
+failures and four skips are the long-standing Windows-only artifacts, confirmed
+pre-existing. **Verification on the Linux target is still pending.**
+
+
+## v0.2b.97 -- one host, two deployments: the unit follows SERVICE_NAME
+
+Wanted for a split by *risk class* rather than by job title: one agent holding
+SSH keys to production, a second one that reads papers and writes code and
+should never be able to reach the first one's credentials at all.
+
+Almost nothing stood in the way. State has been install-relative for a long
+time -- brief, memory, PIN, sessions, servers, MCP registry, ledger -- and
+`SERVICE_NAME` was already settable and already used for `/update`'s restart.
+One line never followed it:
+
+    SERVICE_UNIT_PATH = Path("/etc/systemd/system/lite-agent.service")
+
+That is not a cosmetic clash. `refresh_systemd_unit()` renders the template
+with **this** install's user and directory, `apply_hardening_on_start()` calls
+it on every start, and it reports "refreshed" whenever the file on disk differs
+from its own render. So with two installs sharing the name: B rewrites A's
+unit, A starts, sees a unit that is not its render, rewrites it and restarts,
+B does the same from the other side -- **the two restart each other without
+end.** Both bots keep answering throughout, which is what makes it easy to miss:
+nothing looks broken until someone reads `NRestarts`.
+
+The default is unchanged, so existing deployments are untouched -- verified by
+loading the module three times in one process and printing what each would
+manage: unset gives exactly the old path, `lite-agent-ops` and
+`lite-agent-build` give their own.
+
+The installer half matters as much and is the easy half to leave out, because
+nothing fails immediately without it: `install.sh` now takes `SERVICE_NAME`
+from the environment and **writes it into `.env` when it is not the default**.
+Without that line the process reads the default and goes back to restarting a
+unit that does not exist while rewriting the other deployment's file -- the same
+bug, reintroduced through the installer instead of the source. Written only when
+custom, keeping `.env`'s "overrides only" convention.
+
+Both halves of the split that this does NOT solve are documented rather than
+half-fixed, because they are `$HOME`-relative with no override: a second
+deployment needs its own **Linux user** (or `/unlock` in one opens write mode
+for both, via the shared `~/.ssh/agent_active`; and `~/.ssh/config`, rclone's
+config and agy's global MCP registry are shared too) and its own **bot token**
+(one token polled by two processes gets both rejected with `409 Conflict`).
+
+**Two pre-existing faults found while in there**, both in the file being edited:
+
+- The `chmod 600` loop in `install.sh` had lost its line continuations to a
+  one-line collapse, leaving a literal `\n` in the middle of the word list.
+  Unquoted, `sh` reads that as the word `n` -- confirmed in a real shell rather
+  than assumed (`for f in a \n b` yields `a`, `n`, `b`) -- so every install
+  chmod'd a phantom `$INSTALL_DIR/n`. Harmless only by luck, and the next person
+  to add a filename would have been editing damaged text.
+- Nothing was checking that loop against `HARDEN_600`, the list covering the
+  same files from the other direction (every start and every `/update`). A file
+  added to one and forgotten in the other is a state file that stays
+  world-readable on whichever path is not taken. They agree today; a test now
+  says so.
+
+New: `dev/test_service_name.py`, 22 tests, pure source inspection -- no systemd,
+no root, same result on any OS. Verified both ways, as the detector for a
+one-line regression has to be: **10/22 against the pre-fix tree**, naming each
+of the twelve real faults (including the phantom `\n`, which surfaced on its own
+in the drift check as `only in .sh: ['\n']`), and 22/22 after.
+
+Rebased onto v0.2b.70 and re-verified there: it touches neither the systemd
+path nor `HARDEN_600`, so only the changelog needed a hand (this entry sits
+above it, being unreleased).
+
+Full suite: **653/655 across 33 suites** on this Windows dev box. The two
+failures and four skips are the long-standing Windows-only artifacts, confirmed
+pre-existing by running the same suites against the stashed tree and getting
+byte-identical results. **Verification on the Linux target is still pending** --
+this is a systemd path, and this dev box is not Linux, so "two deployments no
+longer restart each other" rests on source inspection plus a functional check
+of the path each one resolves, not on a real host.
 ## v0.2b.96 -- wording pass on the neutral ack pool
 
 Wording only, chosen by the operator: the GENERIC ack pool (fires when a

@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""Tests for newagent.sh -- provisioning an ADDITIONAL deployment on one host.
+
+Adding an agent means creating a Linux user with shell access, its own SSH
+directory and its own subscription logins. That is a strictly larger capability
+than anything the bot gates behind a PIN, which is why it is a script an
+operator runs with root rather than a Telegram command. These tests cover the
+two things that decide whether it is safe.
+
+**1. The name is validated, not quoted.** It becomes a username, a directory
+and a systemd unit name in the same breath, so `../etc`, `x;rm -rf /`, spaces
+and uppercase are refused outright -- and refused BEFORE the root check, so a
+typo is reported as a typo instead of sending someone to find sudo first only
+to be turned away again.
+
+**2. The permanent sudo grant is `systemctl restart <this unit>` and nothing
+else.** /update ends by restarting its own service, and without that the bot
+updates itself and never comes back. But refresh_systemd_unit() also wants to
+`cp` a rendered unit into /etc/systemd/system, and granting THAT would let the
+service user rewrite its own unit with `User=root` and own the host on the next
+restart -- making every deployment on the box root-equivalent and reducing the
+per-user isolation to decoration. The bot already treats that write as
+best-effort (it logs and carries on without restarting), so refusing it costs a
+convenience, not correctness. Several tests below exist purely to stop that
+grant being widened later by someone fixing the log line.
+
+The broad rights install.sh genuinely needs (apt, writing the unit) are granted
+only for the duration of the install and removed by a trap on every exit path,
+including Ctrl-C and a failed install.
+"""
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+
+SRC = pathlib.Path(sys.argv[1]).resolve()
+ROOT = SRC.parent
+SCRIPT = ROOT / "newagent.sh"
+
+results = []
+def check(name, cond):
+    results.append((name, bool(cond)))
+    print(("PASS" if cond else "FAIL"), "-", name)
+
+
+check("newagent.sh exists", SCRIPT.is_file())
+if not SCRIPT.is_file():
+    print("\n0/1 passed")
+    print("FAILED: ['newagent.sh exists']")
+    print("the provisioning script is absent from this source -- every check "
+          "below needs it")
+    sys.exit(1)
+
+text = SCRIPT.read_text(encoding="utf-8")
+BASH = shutil.which("bash")
+
+
+def run(*args):
+    """newagent.sh as a real subprocess. Never with root, so nothing here can
+    create a user or write a unit -- every path exercised below refuses before
+    reaching anything privileged."""
+    return subprocess.run([BASH, str(SCRIPT), *args],
+                          capture_output=True, text=True, timeout=60)
+
+
+# --- 1. it parses at all ----------------------------------------------------
+if BASH:
+    syntax = subprocess.run([BASH, "-n", str(SCRIPT)], capture_output=True, text=True)
+    check("the script is syntactically valid", syntax.returncode == 0)
+else:
+    check("bash is available to run the script (skipped check otherwise)", False)
+
+# --- 2. the name is refused before anything privileged ----------------------
+if BASH:
+    for bad, why in (
+        ("Ops", "uppercase"),
+        ("a b", "a space"),
+        ("../etc", "path traversal"),
+        ("x;rm -rf /", "a shell metacharacter"),
+        ("café", "a non-ascii character"),
+        ("a" * 21, "over the length limit"),
+    ):
+        r = run(bad)
+        out = r.stdout + r.stderr
+        check(f"a name with {why} is refused", r.returncode != 0)
+        check(f"...and the message names the NAME, not root ({why})",
+              ("name must be" in out or "too long" in out) and "must run as root" not in out)
+
+    r = run("ops")
+    out = r.stdout + r.stderr
+    check("a VALID name gets past validation and stops at the root check",
+          r.returncode != 0 and "must run as root" in out)
+
+    check("no argument at all prints usage", "usage:" in (run().stdout + run().stderr))
+    check("an unknown option is refused",
+          "unknown option" in (run("ops", "--wat").stdout + run("ops", "--wat").stderr))
+
+
+# --- 3. the permanent sudo grant is narrow ---------------------------------
+# The runtime rule is written by a heredoc; take the block it emits.
+runtime = re.search(r'cat > "\$SUDOERS_RUNTIME" <<EOF(.*?)\nEOF', text, re.S)
+check("a permanent sudoers rule is written", runtime is not None)
+rule = runtime.group(1) if runtime else ""
+grant = "\n".join(ln for ln in rule.splitlines() if "NOPASSWD" in ln)
+
+check("the permanent grant is systemctl restart", "systemctl restart" in grant)
+check("...scoped to THIS deployment's unit, not any unit",
+      "${SERVICE_NAME}" in grant)
+check("...and is not a blanket ALL", not re.search(r"NOPASSWD:\s*ALL", grant))
+check("the permanent grant does NOT include cp, which would let the service "
+      "user rewrite its own unit as root",
+      " cp " not in grant and "/bin/cp" not in grant)
+check("...nor any write into /etc/systemd/system",
+      "/etc/systemd/system" not in grant)
+check("...nor daemon-reload, which is only reachable after the cp it does not have",
+      "daemon-reload" not in grant)
+check("the rule explains the refusal, so the next person to 'fix' the log line "
+      "sees why it is deliberate",
+      "rewrite" in rule and "root" in rule)
+# The grant and the call site are two files apart, and drifting apart is
+# silent. /update pulled new code, logged "restarting", got "sudo: a password
+# is required", and left the OLD process running while telling the operator the
+# update had applied -- because the rule said "systemctl restart X" and the bot
+# runs "systemctl --no-block restart X", which sudoers does not treat as the
+# same command. Python had already imported the module, so the checkout moved
+# and the behaviour did not: two consecutive fixes shipped and neither took
+# effect. This reads the actual call site instead of trusting the rule.
+la_src = SRC.read_text(encoding="utf-8")
+restart_calls = re.findall(r'\[\s*"sudo"\s*,\s*"-n"\s*,\s*"systemctl"(.*?)\]',
+                           la_src, re.S)
+check("the bot's self-restart call site is found in lite_agent.py",
+      bool(restart_calls))
+checked_any = False
+for raw in restart_calls:
+    argv = re.findall(r'"([^"]+)"', raw)
+    # RESTART calls only. `sudo -n systemctl daemon-reload` is also in there and
+    # is deliberately NOT granted: it is only reachable after the cp into
+    # /etc/systemd/system that this script refuses on purpose, and a check above
+    # asserts daemon-reload stays out of the rule. Demanding coverage for every
+    # sudo call would turn this test into an argument for widening the grant --
+    # the opposite of what it is for.
+    if "restart" not in argv:
+        continue
+    checked_any = True
+    if "SERVICE_NAME" in raw:
+        argv.append("${SERVICE_NAME}")
+    wanted = "systemctl " + " ".join(argv)
+    check(f"the grant authorises exactly what the bot runs: `{wanted}`",
+          wanted in grant)
+check("at least one restart call site was actually examined, so this section "
+      "cannot pass by matching nothing",
+      checked_any)
+check("...and --no-block specifically is covered, since that is the flag that "
+      "made sudo ask for a password and swallowed two updates",
+      "--no-block restart" in grant)
+
+check("the generated rule is validated with visudo before being trusted",
+      "visudo -cf" in text)
+check("...and an invalid one is removed rather than left in /etc/sudoers.d",
+      re.search(r'visudo -cf "\$SUDOERS_RUNTIME".*rm -f "\$SUDOERS_RUNTIME"', text, re.S) is not None)
+
+# --- 4. the broad install-time grant cannot outlive the install ------------
+check("the temporary install rule is a separate file from the runtime one",
+      "SUDOERS_INSTALL=" in text and "SUDOERS_RUNTIME=" in text
+      and "ismart-${NAME}-install" in text)
+check("a trap removes it on EXIT, INT and TERM -- Ctrl-C and a failed install "
+      "included, which is the only reason granting it is defensible",
+      re.search(r"trap cleanup EXIT INT TERM", text) is not None)
+cleanup = re.search(r"cleanup\(\)\s*\{(.*?)\n\}", text, re.S)
+check("...and the trap actually deletes that file",
+      cleanup is not None and "$SUDOERS_INSTALL" in cleanup.group(1)
+      and "rm -f" in cleanup.group(1))
+
+# --- 5. nothing existing is ever overwritten -------------------------------
+# An existing deployment holds a PIN hash, sessions, SSH keys and connected
+# Drive accounts. "Provision" must never be able to mean "destroy those".
+for what, needle in (
+    ("an existing user", 'id -u "$USER_NAME"'),
+    ("an existing install directory", '[ -e "$INSTALL_DIR" ]'),
+    ("an existing systemd unit", '[ -e "$UNIT_PATH" ]'),
+):
+    check(f"it refuses when {what} is already there", needle in text)
+check("...and each refusal stops the script rather than continuing quietly",
+      len(re.findall(r"already exists -- (?:use --resume|refusing)", text)) >= 3)
+
+# --- 5b. ...but a half-finished install can still be retried ---------------
+# install.sh downloads the Claude Code and agy CLIs, so it can fail halfway
+# through on a slow or interrupted network. The first version of this script
+# said "left in place so you can retry" and then refused exactly that retry on
+# the next run -- found on its first real Linux execution, where the Claude
+# installer was interrupted.
+check("--resume exists, so a half-finished install is not a dead end",
+      "--resume" in text and "RESUME=1" in text)
+check("...the failure message names it, rather than suggesting a retry that "
+      "the guard above would refuse",
+      re.search(r"install\.sh failed.*--resume", text, re.S) is not None)
+check("--resume REQUIRES the user and directory to exist, so it cannot be used "
+      "to half-provision something that was never started",
+      re.search(r'RESUME.*-eq 1.*does not exist', text, re.S) is not None)
+check("--resume still never overwrites an existing unit",
+      re.search(r'RESUME.*-eq 0', text, re.S) is not None
+      and '[ -e "$UNIT_PATH" ]' in text)
+check("--resume never re-creates a user that already exists",
+      re.search(r'RESUME_NEEDS_CLONE" -eq 0 \].*useradd', text, re.S) is not None)
+# The clone is where a real run failed, leaving the user created and no
+# directory: a fresh run refused (user exists) and --resume refused (directory
+# does not). Resuming now covers the clone, so a failure anywhere in that
+# sequence has a way forward.
+check("--resume also clones when the checkout is the part that is missing",
+      "RESUME_NEEDS_CLONE=1" in text
+      and 'RESUME_NEEDS_CLONE" -eq 1 ]' in text)
+# A local path is the only usable source while the real repo is private and
+# the new user has no key yet -- and git refuses to read a repository owned by
+# somebody else ("detected dubious ownership"), which a staging copy always is.
+check("a local --repo is made readable to the new user rather than failing on "
+      "git's ownership check",
+      "safe.directory" in text and '"$REPO/.git"' in text)
+check("...and tags are fetched after a local clone, since a clone from a path "
+      "brings none and current_version() is `git describe --tags`",
+      'fetch --tags --quiet "$REPO"' in text)
+check("--resume with --no-install is refused, since it would do nothing at all",
+      "would do nothing" in text)
+
+# --- 6. the deployment it creates is actually separate ---------------------
+check("the new deployment gets its own SERVICE_NAME, so it does not fight the "
+      "other deployments over one unit file",
+      'SERVICE_NAME="lite-agent-${NAME}"' in text
+      and 'SERVICE_NAME=${SERVICE_NAME}' in text)
+check("install.sh is run AS the new user, not as root -- otherwise the service "
+      "would run as root and share nothing",
+      re.search(r'sudo -H -u "\$USER_NAME".*install\.sh', text, re.S) is not None)
+# install.sh puts both CLIs in $HOME/.local/bin and agy's credentials in
+# $HOME/.gemini. Plain `sudo -u` does not necessarily reset HOME, so those can
+# land in the INVOKING user's home -- root's -- owned by root, where the service
+# user can neither write them during the install nor read them afterwards. -H
+# makes it explicit rather than depending on the host's sudoers defaults.
+check("every hand-off to the new user uses sudo -H, so $HOME is really theirs",
+      "sudo -u " not in text and text.count("sudo -H -u") >= 2)
+check("the user gets a real home directory, which is what actually separates "
+      "~/.ssh, the CLI logins and rclone's config",
+      "--create-home" in text)
+check("it warns that each deployment needs its own bot token",
+      "409" in text)
+
+failed = [n for n, ok in results if not ok]
+print(f"\n{len(results) - len(failed)}/{len(results)} passed")
+if failed:
+    print("FAILED:", failed)
+    sys.exit(1)
