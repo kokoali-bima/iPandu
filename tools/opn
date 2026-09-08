@@ -1,0 +1,165 @@
+#!/bin/bash
+# opn -- call an OPNsense API, with writes tied to /unlock.
+#
+# One API key does both jobs here, by the operator's choice: OPNsense grants
+# privileges per PAGE rather than per verb, so a key that can read the firewall
+# page can also post to it, and issuing a second "read-only" key means a second
+# credential to rotate and revoke for a boundary OPNsense cannot actually
+# enforce. The gate lives here instead.
+#
+# What that buys, and what it does not:
+#
+#   Reads are ungated. Most questions asked of this bot are reads -- interface
+#   status, a rule listing, why something is slow -- and making those ask
+#   permission would be friction with nothing behind it.
+#
+#   Writes require write mode to be OPEN, checked against the very file
+#   /unlock writes (BASE_DIR/write_mode.json, with its expiry). Not a copy of
+#   the rule, the rule itself: when the window closes, writes stop.
+#
+#   Before the first write of each window, the running config is downloaded to
+#   BASE_DIR/opnsense-backups/. The bot does this rather than the agent, for
+#   the same reason take_snapshot() exists: the agent cannot be relied on to
+#   create a rollback point for a change it has not decided to make yet. Paired
+#   with OPNsense's own configuration history, a bad change is one revert away.
+#
+#   It is NOT a wall. The agent runs as this same Linux user and could curl the
+#   key directly. That is equally true of ~/.ssh/agent_write today, and the
+#   honest answer is the same: this marks intent, prevents accidents, and
+#   leaves a trail -- the protection that actually matters is the rollback
+#   point taken before the change.
+#
+# Usage:
+#   opn /api/core/firmware/status
+#   opn /api/diagnostics/interface/getInterfaceNames
+#   opn /api/firewall/filter/addRule -X POST -d '{"rule":{...}}'
+#
+# Config, all beside the key in ~/.opnsense/ :
+#   api.key    "key:secret" on one line, mode 600      (required)
+#   base_url   e.g. https://172.16.10.20:1945          (required)
+#   vpn_unit   e.g. openvpn-client@uin                 (optional)
+set -u
+
+CONF_DIR="${OPN_CONF_DIR:-$HOME/.opnsense}"
+SELF="$(readlink -f "$0")"
+BASE_DIR="${OPN_BASE_DIR:-$(dirname "$(dirname "$SELF")")}"
+WRITE_STATE="$BASE_DIR/write_mode.json"
+BACKUP_DIR="$BASE_DIR/opnsense-backups"
+LOG="$BASE_DIR/opnsense.log"
+
+die() { echo "opn: $*" >&2; exit 1; }
+
+[ $# -ge 1 ] || die "usage: opn <api-path> [curl args...]"
+API_PATH="$1"; shift
+case "$API_PATH" in
+    /api/*) ;;
+    *) die "path must start with /api/ -- got '$API_PATH'" ;;
+esac
+
+[ -r "$CONF_DIR/api.key" ]  || die "no API key at $CONF_DIR/api.key"
+[ -r "$CONF_DIR/base_url" ] || die "no base URL at $CONF_DIR/base_url"
+CRED="$(head -1 "$CONF_DIR/api.key" | tr -d '\r\n')"
+# tr -d only for the line ending. It was briefly given '/' as well, meaning to
+# drop a trailing slash -- but tr deletes EVERY match, so
+# https://host:1945 became https:host:1945, curl failed silently under -s, and
+# the host extraction below cut at the first colon and looked up "https".
+# Strip exactly one trailing slash, with parameter expansion.
+BASE="$(head -1 "$CONF_DIR/base_url" | tr -d '\r\n')"
+BASE="${BASE%/}"
+[ -n "$CRED" ] || die "$CONF_DIR/api.key is empty"
+case "$BASE" in
+    http://*|https://*) ;;
+    *) die "base_url must start with http:// or https:// -- got '$BASE'" ;;
+esac
+
+# --- is this a write? ------------------------------------------------------
+# OPNsense reads with GET and changes with POST, so the question is only
+# whether this invocation is a POST. Erring toward "write" is the safe
+# direction: the cost of a false positive is being told to /unlock, the cost of
+# a false negative is an unguarded change to a campus firewall.
+IS_WRITE=0
+prev=""
+for arg in "$@"; do
+    case "$prev" in
+        -X|--request) [ "$arg" = "GET" ] || IS_WRITE=1 ;;
+    esac
+    case "$arg" in
+        -d|--data|--data-raw|--data-binary|--data-urlencode|-F|--form) IS_WRITE=1 ;;
+        --data=*|--data-raw=*|--data-binary=*|-X[A-Z]*) IS_WRITE=1 ;;
+    esac
+    prev="$arg"
+done
+
+# Read the expiry out of write_mode.json without a JSON parser. Deliberately
+# not python3: this runs on whatever the deployment happens to have, and a
+# firewall gate that fails open because an interpreter is missing would be
+# worse than no gate at all. The file is written by unlock_write_mode() and
+# holds exactly {"until": <epoch float>}.
+window_until() {
+    [ -r "$WRITE_STATE" ] || return 1
+    sed -n 's/.*"until"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\)\(\.[0-9]*\)\{0,1\}.*/\1/p' \
+        "$WRITE_STATE" | head -1
+}
+
+write_mode_open() {
+    local until
+    until="$(window_until)" || return 1
+    [ -n "$until" ] || return 1
+    [ "$until" -gt "$(date +%s)" ] 2>/dev/null
+}
+
+if [ "$IS_WRITE" -eq 1 ] && ! write_mode_open; then
+    # Say what to do, not just no. The agent relays this to the operator, and a
+    # refusal they cannot act on is worse than the change being slow.
+    die "this call would CHANGE the firewall, and write mode is closed.
+     Ask the operator to run /unlock in a private DM first; it opens for a
+     fixed window and this command will work for as long as it lasts.
+     Reads (plain GET) work right now, without unlocking."
+fi
+
+# --- bring the tunnel up if the API lives behind one -----------------------
+# curl does not go through ssh, so the ProxyCommand that raises the UIN tunnel
+# never fires for an API call. Without this, the first request after an idle
+# shutdown fails with a routing error that looks like the firewall is down.
+if [ -r "$CONF_DIR/vpn_unit" ]; then
+    UNIT="$(head -1 "$CONF_DIR/vpn_unit" | tr -d '\r\n')"
+    HOST="$(printf '%s' "$BASE" | sed -E 's#^https?://##; s#[:/].*$##')"
+    if [ -n "$UNIT" ] && ! ip route get "$HOST" 2>/dev/null | grep -q ' dev tun'; then
+        sudo -n systemctl start "$UNIT" >/dev/null 2>&1
+        for _ in $(seq 1 40); do
+            ip route get "$HOST" 2>/dev/null | grep -q ' dev tun' && break
+            sleep 0.5
+        done
+    fi
+fi
+
+# --- rollback point, once per unlock window --------------------------------
+if [ "$IS_WRITE" -eq 1 ]; then
+    mkdir -p "$BACKUP_DIR" && chmod 700 "$BACKUP_DIR"
+    # Keyed on the window's expiry, so one backup per /unlock rather than one
+    # per call -- and a fresh one the next time write mode is opened.
+    WINDOW="$(window_until)"; WINDOW="${WINDOW:-now}"
+    MARK="$BACKUP_DIR/.window-$WINDOW"
+    if [ ! -e "$MARK" ]; then
+        STAMP="$(date +%Y%m%d-%H%M%S)"
+        if curl -k -s --max-time 60 -u "$CRED" \
+                "$BASE/api/core/backup/download/this" \
+                -o "$BACKUP_DIR/config-$STAMP.xml" \
+           && [ -s "$BACKUP_DIR/config-$STAMP.xml" ]; then
+            chmod 600 "$BACKUP_DIR/config-$STAMP.xml"
+            touch "$MARK"
+            echo "opn: saved a rollback point at $BACKUP_DIR/config-$STAMP.xml" >&2
+        else
+            rm -f "$BACKUP_DIR/config-$STAMP.xml"
+            # Refuse. A write with no way back is the situation this exists to
+            # prevent, and "the backup failed" is exactly when it matters.
+            die "could not download a config backup, so the change was NOT made.
+     Retry, or take a backup by hand in System > Configuration > Backups."
+        fi
+    fi
+fi
+
+printf '%s  %s  %s\n' "$(date -Is)" "$([ "$IS_WRITE" -eq 1 ] && echo WRITE || echo read)" \
+    "$API_PATH" >> "$LOG" 2>/dev/null
+
+exec curl -k -s --max-time 90 -u "$CRED" "$BASE$API_PATH" "$@"

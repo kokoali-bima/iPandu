@@ -7,7 +7,7 @@ A report doesn't have to stop at the chat: it can land straight in a shared
 [Google Drive](#google-drive-optional) folder too, connected the same explicit way as
 everything else here -- through Telegram, not a config file.
 
-> **Status: v0.2b.96 -- early/beta.** Built and battle-tested against a real production
+> **Status: v0.2b.97 -- early/beta.** Built and battle-tested against a real production
 > Proxmox VE cluster over several days of iteration, including a live-fire test of the
 > unlock/PIN/snapshot flow against real infrastructure. Works well; still has known
 > rough edges (see [Known limitations](#known-limitations)).
@@ -60,6 +60,10 @@ down, this is the map.
   secret.
 - `/remember`'s memory is **per chat** -- a fact saved in one group's chat is never
   injected into another chat's next turn.
+- The **role itself can differ per room** (`/setchatscope`), so one deployment can
+  answer a network-engineering group and a research group as the thing each of them
+  needs -- layered on the shared brief, never replacing it, so a boundary added
+  later still reaches every room.
 - The owner alone can grant themselves extra scope that applies **only** in their
   own private DM, never in any group even when they're the one typing there
   (`/setownerscope`).
@@ -214,6 +218,70 @@ all. [`examples/proxmox/`](./examples/proxmox/) is one worked example, not a req
 shape -- a Kubernetes cluster, a fleet of web servers, or a CI estate all work the
 same way.
 
+### More than one deployment on one host
+
+Two agents with genuinely different jobs -- one that holds SSH keys to production,
+one that only reads papers and writes code -- are better kept apart than merged,
+because the second one's blast radius should not include the first one's
+credentials. Each install is already independent in everything that matters: the
+brief, memory, PIN, sessions, registered servers, MCP registry and ledger are all
+relative to the install directory.
+
+Each one needs its own service name and its own Linux user. `newagent.sh` does
+both, then hands over to `install.sh`:
+
+```bash
+sudo ./newagent.sh ops      # -> user isla-ops,   service lite-agent-ops
+sudo ./newagent.sh build    # -> user isla-build, service lite-agent-build
+```
+
+It refuses to touch an existing user, directory or unit — an existing deployment
+holds a PIN hash, sessions, SSH keys and connected Drive accounts, and
+"provision" must never be able to mean "destroy those". By hand it is the same
+three steps:
+
+```bash
+sudo useradd -m isla-ops
+sudo -u isla-ops git clone <this-repo> /home/isla-ops/lite-agent
+cd /home/isla-ops/lite-agent && SERVICE_NAME=lite-agent-ops ./install.sh
+```
+
+**The sudo rights it grants are narrower than you might expect, on purpose.**
+`/update` ends with `sudo -n systemctl restart <service>`, so exactly that one
+command is granted, for exactly that one unit. `refresh_systemd_unit()` also
+wants to `cp` a rendered unit into `/etc/systemd/system`, and that is **not**
+granted: it would let the service user rewrite its own unit with `User=root` and
+take the host on the next restart, which would make every deployment on the box
+root-equivalent and reduce the separate-user isolation to decoration. The bot
+already treats that write as best-effort — it logs `could not write the unit
+(needs sudo)` and carries on without restarting, so nothing loops. **Refreshing
+the unit after a release that changes the template is an operator action:**
+re-run `install.sh` as root for that deployment.
+
+The broad rights `install.sh` genuinely needs (apt, writing the unit the first
+time) are granted only while it runs, and removed by a trap on every exit path —
+Ctrl-C and a failed install included.
+
+**The service name is not optional.** Two installs sharing one unit name do not
+merely look untidy: each start re-renders `/etc/systemd/system/<name>.service`
+with *its own* directory and user, sees the other's version as out of date,
+rewrites it and restarts -- so the pair restart each other without end. The
+installer records a non-default `SERVICE_NAME` in `.env`, which is what lets the
+running process restart the right unit on `/update`.
+
+**The separate Linux user is not optional either.** These live in `$HOME` and have
+no per-install override, so two deployments under one user still share them:
+
+| | why it matters |
+|---|---|
+| `~/.ssh/agent_active` | `/unlock` in one deployment opens **write mode for both** |
+| `~/.ssh/config` | the `/addserver` block is rewritten by whichever ran last |
+| `~/.config/rclone/rclone.conf` | connected Drive accounts are pooled |
+| agy's MCP registry | `agy mcp add` is global to the user, unlike claude's per-call `--mcp-config` |
+
+Each deployment also needs its **own bot token** from @BotFather -- one token
+polled by two processes gets both rejected with `409 Conflict`.
+
 
 ### The environment brief, and how it fills itself in
 
@@ -254,11 +322,45 @@ where it lands: always inside the learned zone, never anywhere else. The boundar
 enforced by code, not by the model's cooperation. Bootstrap follows the same rule --
 your hard boundaries are copied in verbatim, never paraphrased by a model.
 
+#### `/setchatscope` -- a different job per room, on one deployment
+
+`/setscope` is one shared setting, and for "what is this bot for" that's the right
+answer. It can't serve the case where a network-engineering group and a research
+group talk to the same bot and genuinely need different roles. `/setchatscope`
+overrides the role **in the chat it's run in, and nowhere else**:
+
+```
+/setchatscope machine-learning research assistant, strong on experiment design
+```
+
+Gated like `/setscope` and `/addserver` -- the owner anywhere, or a registered
+group's own admin inside that group. No PIN: it grants no capability. The tools,
+the machines it can reach and the boundaries are all exactly what they were; only
+the description of the job changes. `/setchatscope clear` returns the room to the
+shared role, and running it bare shows both.
+
+**It adds to the shared brief rather than replacing it, and that's the whole
+design.** Hard boundaries live *inside* the brief -- `/addboundary` rewrites the
+bullet list in `SOUL.md` and `GEMINI.md` -- so a per-chat brief *file* would mean a
+boundary added next week silently never reaching the rooms that have one, with
+nothing to indicate it. A layer can't have that bug: the shared brief still goes
+out in full every turn and the room's role is appended after it, saying in as many
+words that it takes precedence over the role and that the boundaries above it do
+not bend. There's a test that adds a boundary *after* a room has its own role and
+checks it still arrives.
+
+The honest cost: a research room still carries infrastructure-brief text it has no
+use for. That's token overhead, not a hole -- and if a persona shouldn't even *see*
+the other one's brief, the answer is [a separate deployment](#more-than-one-deployment-on-one-host),
+not this.
+
+Per-chat memory (`/remember`) and per-chat model overrides (`/usemodel`) already
+worked this way, so a room can carry its own role, its own facts and its own model
+without any of the three leaking sideways.
+
 #### `/setownerscope` -- extra scope, owner-only, DM-only
 
-`/setscope` is deliberately **one shared setting** -- every group and every DM sees
-the exact same brief, on purpose, so there's one predictable answer to "what is this
-bot for" everywhere it's used. `/setownerscope` sits on top of that for one specific
+`/setownerscope` sits on top of the same base for one specific
 case: the owner wants the bot to also help with general things (a joke, casual
 questions) in their own DM, without loosening what every group gets.
 
@@ -318,6 +420,7 @@ Ollama, say), since something has to translate between protocols.
 | `/update` | owner/admin + PIN | Check GitHub for a newer version and install it |
 | `/setbrief <one line>` | owner/admin | Say what this agent looks after (also the 4th item on `/start`) |
 | `/setscope <phrase>` | owner/admin | Change what KIND of assistant it is, not just what it manages |
+| `/setchatscope <phrase>` | owner/admin | The role for **this chat only**, overriding `/setscope` here -- one deployment, a different job per room |
 | `/setownerscope <text>` | owner, **own DM only** | Extra scope on top of `/setscope`, for the owner alone, in their own DM only -- never a group, even one the owner is speaking in |
 | `/logout` | owner/admin | Clear a sign-in (Gemini or Claude) for a genuinely fresh /start |
 | `/boundaries` | **0 tokens** | What the agent must never do |
@@ -573,11 +676,36 @@ company account used across multiple client rooms) — the folder split is a
 convenience default, not a hard permission boundary enforced by Google itself, so
 treat the escape hatch as something only a trusted admin should reach for.
 
-**Known limitation:** rclone's shared default `client_id` (used above, since it
-needs no Google Cloud project of your own) is being retired sometime in 2026 and
-can occasionally hit a shared rate limit under global load (rclone retries with
-backoff automatically). If it stops working, the fix is creating your own
-`client_id` — see rclone's docs linked above.
+#### Dated: rclone's shared OAuth client is being retired in 2026
+
+The zero-setup path above uses rclone's own shared `client_id`. Google has begun
+charging for API requests made through it, and shared usage sits far over the
+free quota, so **rclone is retiring it during 2026** — after a 90-day notice.
+From then on every user needs their own `client_id` / `client_secret`. It can
+also hit a shared rate limit under global load today (rclone retries with
+backoff on its own).
+
+**This is not solved by dropping rclone for the Drive API directly.** Any OAuth
+app needs a client of its own; Google requires one either way. The retirement
+forces exactly the same action whichever library moves the bytes, so rewriting
+would add work without removing the deadline.
+
+What matters here is *which* client refreshes an account. An access token lasts
+about an hour; everything after that is the refresh, and rclone refreshes using
+the `client_id` stored on the remote — with none stored, its shared one.
+
+- **Connected through `/connectgdrive` with your own OAuth client** (the device
+  flow): the client is now recorded on the remote, so these keep working
+  straight through the retirement.
+- **Connected the zero-setup way, or by pasting a token**: these refresh through
+  rclone's shared client and will stop about an hour after it goes.
+  **`/gdrivestatus` names them**, so they are visible while there is still time
+  rather than discovered as "Drive suddenly broke".
+
+Fixing one means setting up your own OAuth client and running `/connectgdrive`
+again for that account. Reconnecting is unavoidable, not laziness in the
+implementation: a refresh token belongs to the client that issued it, so an
+existing one cannot be re-pointed at a new client.
 
 ### MCP servers (optional)
 
@@ -882,6 +1010,7 @@ runaway background cost.
 ```
 lite_agent.py              the bot itself
 install.sh                 interactive installer
+newagent.sh                provision an ADDITIONAL deployment (own user + service)
 bootstrap.py               generates SOUL.md / GEMINI.md from a few questions
 requirements.txt
 .env.example                every setting, documented

@@ -378,9 +378,16 @@ check("...and offered the same way, gated the same way",
 
 check("CAPABILITIES_BRIEF documents the SERVER: tag",
       "SERVER: name=" in mod.CAPABILITIES_BRIEF)
+# This fork injects capabilities_brief() rather than the bare constant: the
+# function appends whatever THIS deployment actually has wired up, so a box
+# with no OPNsense credentials is not told about a tool it cannot use. The
+# rule being guarded is unchanged -- both models must receive it -- so match
+# either form rather than the spelling one of them happens to use.
 check("...and is injected into BOTH models -- agy AND claude -- not just one",
-      "parts.append(CAPABILITIES_BRIEF)" in src
-      and "extra_parts.insert(0, CAPABILITIES_BRIEF)" in src)
+      ("parts.append(CAPABILITIES_BRIEF)" in src
+       or "parts.append(capabilities_brief())" in src)
+      and ("extra_parts.insert(0, CAPABILITIES_BRIEF)" in src
+           or "extra_parts.insert(0, capabilities_brief())" in src))
 
 check("the manual wizard's own user check now shares _USER_RE with the parser",
       'if not _USER_RE.match(text):' in src)
