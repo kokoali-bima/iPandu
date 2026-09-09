@@ -9608,10 +9608,10 @@ RCLONE_AUTH_FINISH_TIMEOUT = 60
 # the tool actually said.
 _MSG = {
     "rclone_missing_unsupported": (
-        "no rclone here, and I only know how to fetch the linux-amd64 build. "
-        "Install it with: curl https://rclone.org/install.sh | sudo bash",
-        "rclone belum ada di sini, dan saya hanya bisa mengunduh versi "
-        "linux-amd64. Pasang dengan: curl https://rclone.org/install.sh | sudo bash"),
+        "no rclone here, and I only know how to fetch a linux amd64/arm64 "
+        "build. Install it with: curl https://rclone.org/install.sh | sudo bash",
+        "rclone belum ada di sini, dan saya hanya bisa mengunduh versi linux "
+        "amd64/arm64. Pasang dengan: curl https://rclone.org/install.sh | sudo bash"),
     "rclone_download_failed": (
         "couldn't download rclone. Install it with: "
         "curl https://rclone.org/install.sh | sudo bash",
@@ -9719,7 +9719,20 @@ def _detail(lang: str, detail: str) -> str:
 
 
 RCLONE_LOCAL_BIN = BASE_DIR / "bin" / "rclone"
-RCLONE_DOWNLOAD_URL = "https://downloads.rclone.org/rclone-current-linux-amd64.zip"
+# platform.machine() -> rclone's own arch name in its download URLs, confirmed
+# against the real listing at downloads.rclone.org rather than assumed. Only
+# the two architectures an actual cloud VM turns up as are mapped -- arm-v7,
+# 386 and friends belong to hosts this project was never asked to run on.
+RCLONE_DOWNLOAD_ARCH = {"x86_64": "amd64", "amd64": "amd64",
+                       "aarch64": "arm64", "arm64": "arm64"}
+
+
+def _rclone_download_url() -> Optional[str]:
+    """rclone's own static-binary URL for this machine's architecture, or
+    None when the architecture isn't one of the two above."""
+    arch = RCLONE_DOWNLOAD_ARCH.get(platform.machine())
+    return (f"https://downloads.rclone.org/rclone-current-linux-{arch}.zip"
+            if arch else None)
 
 
 def _rclone_path() -> Optional[str]:
@@ -9750,13 +9763,16 @@ def ensure_rclone() -> tuple[bool, str]:
     existing = _rclone_path()
     if existing:
         return True, existing
-    if sys.platform != "linux" or platform.machine() not in ("x86_64", "amd64"):
+    if sys.platform != "linux":
+        return False, "rclone_missing_unsupported"
+    url = _rclone_download_url()
+    if not url:
         return False, "rclone_missing_unsupported"
     staging = Path(tempfile.mkdtemp(prefix="isla_rcdl_"))
     try:
         RCLONE_LOCAL_BIN.parent.mkdir(parents=True, exist_ok=True)
         archive = staging / "rclone.zip"
-        with urllib.request.urlopen(RCLONE_DOWNLOAD_URL, timeout=180) as resp:
+        with urllib.request.urlopen(url, timeout=180) as resp:
             archive.write_bytes(resp.read())
         with zipfile.ZipFile(archive) as z:
             inner = next(n for n in z.namelist() if n.endswith("/rclone"))

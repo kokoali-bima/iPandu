@@ -89,11 +89,32 @@ fi
 # is what lets the agent fetch a video someone asks for, and a deployment that
 # never does that loses nothing by its absence.
 if ! command -v yt-dlp >/dev/null 2>&1; then
-    say "Fetching yt-dlp (video download helper)"
-    if sudo curl -sL -o /usr/local/bin/yt-dlp         https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux         && sudo chmod +x /usr/local/bin/yt-dlp; then
-        ok "yt-dlp $(yt-dlp --version 2>/dev/null || echo installed)"
+    # yt-dlp's standalone binary asset is architecture-specific; confirmed
+    # against the real release listing, not assumed. amd64 and arm64 are the
+    # two real cases (a VM, or a Pi/Ampere/Graviton box); anything else is
+    # left to the operator rather than silently fetching a binary that can't
+    # run here.
+    case "$(uname -m)" in
+        x86_64|amd64) _YTDLP_ASSET="yt-dlp_linux" ;;
+        aarch64|arm64) _YTDLP_ASSET="yt-dlp_linux_aarch64" ;;
+        *) _YTDLP_ASSET="" ;;
+    esac
+    if [ -z "$_YTDLP_ASSET" ]; then
+        warn "No prebuilt yt-dlp for this architecture ($(uname -m)) -- asking the agent to find a video won't work until it is installed manually."
     else
-        warn "Could not fetch yt-dlp -- asking the agent to find a video won't work until it is installed."
+        say "Fetching yt-dlp (video download helper)"
+        if sudo curl -sL -o /usr/local/bin/yt-dlp "https://github.com/yt-dlp/yt-dlp/releases/latest/download/${_YTDLP_ASSET}" \
+          && sudo chmod +x /usr/local/bin/yt-dlp \
+          && _YTDLP_VER="$(yt-dlp --version 2>/dev/null)"; then
+            # The version check above is the real gate, not the curl exit
+            # code: a wrong-architecture binary downloads and chmods fine and
+            # only fails here, with "Exec format error" -- exactly the
+            # failure `|| echo installed` used to hide.
+            ok "yt-dlp $_YTDLP_VER"
+        else
+            sudo rm -f /usr/local/bin/yt-dlp
+            warn "Could not fetch a working yt-dlp -- asking the agent to find a video won't work until it is installed."
+        fi
     fi
 else
     ok "yt-dlp already present."
