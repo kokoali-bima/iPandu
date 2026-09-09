@@ -1,4 +1,28 @@
-# iSmart-LA (Lite Agent)
+<div align="center">
+
+# iSmart-LA
+### Lite Agent -- a Telegram bridge to Claude Code & Antigravity CLI
+
+**Infrastructure monitoring and investigation, at a fraction of a full agent
+framework's token cost.**
+
+[![Status](https://img.shields.io/badge/status-v0.2b.99%20beta-blueviolet)](#why-this-exists)
+[![License](https://img.shields.io/badge/license-proprietary-lightgrey)](#credits)
+[![Python](https://img.shields.io/badge/python-3.10--3.13-blue)](#system-requirements)
+[![Architecture](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-success)](#system-requirements)
+[![Tests](https://github.com/kokoali-bima/iSmart-LA/actions/workflows/tests.yml/badge.svg)](https://github.com/kokoali-bima/iSmart-LA/actions/workflows/tests.yml)
+
+🚀 [Quick Start](#quickstart) •
+💡 [Features](#features) •
+🖥️ [Requirements](#system-requirements) •
+📋 [Commands](#commands) •
+☁️ [Google Drive](#google-drive-optional) •
+⚠️ [Limitations](#known-limitations) •
+🙏 [Credits](#credits)
+
+</div>
+
+---
 
 A lightweight Telegram bridge to **Claude Code** and **Antigravity CLI (agy)**, for
 infrastructure monitoring and investigation -- built to be dramatically cheaper to run
@@ -28,6 +52,13 @@ and a manual (never automatic) memory file. Nothing in this codebase decides on 
 to re-run, review, or "improve" a past turn.
 
 ## Features
+
+| | A full agent framework (tried first, on this same infrastructure) | iSmart-LA |
+|---|---|---|
+| Runaway background loop | ❌ A retrying background-review feature burned **~900,000 tokens** in one incident, unwatched | ✅ Nothing runs unless a human asked, right now -- there is no loop to retry |
+| Same 7-node benchmark task | ❌ **3.5x** the cost, on ordinary turns with nothing going wrong | ✅ Baseline -- four fixed-price tiers, cheapest first |
+| Change access | ❌ Whatever the framework's own defaults happen to allow | ✅ Read-only by default; a destructive command needs a time-boxed, PIN-gated `/unlock` |
+| Where it runs | ❌ Tied to wherever the session lives | ✅ Talk to it from Telegram, from anywhere, while it works on a [1-vCPU VM](#system-requirements) -- amd64 or arm64 |
 
 What it actually does, at a glance -- details and full command reference are further
 down, this is the map.
