@@ -410,55 +410,55 @@ Ollama, say), since something has to translate between protocols.
 
 | Command | Cost | What it does |
 |---|---|---|
-| `/status` | **0 tokens** | Instant status check straight from a script (see `tools/`), no model involved |
-| `/tools` | **0 tokens** | List of "graduated" skills (see below) |
-| `/graduate <name>` | 1 call | Turn the case you *just* solved into a reusable script |
-| `/new` | free | Reset the active session's conversation history (MEMORY.md untouched) |
-| `/session <name>` | free | Create/switch to a named session, for keeping cases separate |
-| `/sessions` | free | List saved sessions |
-| `/remember <fact>` | free | Save a fact permanently, read in every session & every tier |
-| `/memory` | free | View current memory contents |
-| `/learned` | free | What the agent worked out about this environment by itself |
-| `/forget <n>` | free | Delete one wrong learned fact (numbers from `/learned`) |
-| `/chatid` | free, no auth needed | Reveal the current chat's ID (for group/access setup) |
-| `/schedules` | **0 tokens** | Everything that runs on a timer, and what it does |
-| `/unschedule <name>` | owner + DM only | Remove a scheduled task |
-| `/adopt` | owner + DM only | Bring pre-existing cron entries under management |
-| `/setpin` | owner, DM **or group** | Set/change the OWNER's PIN -- works everywhere |
-| `/setgrouppin` | owner/admin, in that group | Set/change THAT group's own PIN |
-| `/rmgrouppin` | owner/admin, in that group | Remove that group's own PIN, falls back to the owner's |
-| `/update` | owner/admin + PIN | Check GitHub for a newer version and install it |
-| `/setbrief <one line>` | owner/admin | Say what this agent looks after (also the 4th item on `/start`) |
-| `/setscope <phrase>` | owner/admin | Change what KIND of assistant it is, not just what it manages |
-| `/setchatscope <phrase>` | owner/admin | The role for **this chat only**, overriding `/setscope` here -- one deployment, a different job per room |
-| `/setownerscope <text>` | owner, **own DM only** | Extra scope on top of `/setscope`, for the owner alone, in their own DM only -- never a group, even one the owner is speaking in |
-| `/logout` | owner/admin | Clear a sign-in (Gemini or Claude) for a genuinely fresh /start |
-| `/boundaries` | **0 tokens** | What the agent must never do |
 | `/addboundary <rule>` | owner/admin | Add a hard boundary — run it bare for an explanation of what that means |
-| `/rmboundary <n>` | owner/admin + PIN | Remove one |
-| `/snapshots` | **0 tokens** | Snapshots taken before changes |
-| `/cancel` | free | Abort a multi-step form (/start, /addserver) |
-| `/servers` | **0 tokens** | Machines the agent may reach |
-| `/addserver` | owner/admin + PIN | Register a new machine, step by step |
-| `/removeserver <name>` | owner/admin | Unregister one |
-| `/agentstatus` | tiny probe each | Live check: is each tier actually up right now? |
-| `/providers` | **0 tokens** | Which AI tiers are configured, and which are healthy |
-| `/usemodel [name]` | owner/admin | Force a specific tier for this chat (Opus, Gemini Pro-high, ...); `auto` for the default chain |
 | `/addmcp <name> <cmd> [args]` | owner/admin + PIN | Register an MCP server -- run it bare for a ready-to-use, no-install example |
-| `/rmmcp <name>` | owner/admin | Withdraw one (no PIN -- it only reduces capability) |
-| `/mcpservers` | **0 tokens** | What MCP servers are registered |
-| `/gdrivestatus` | **0 tokens** | Is each connected Drive account still working? |
+| `/addserver` | owner/admin + PIN | Register a new machine, step by step |
+| `/adopt` | owner + DM only | Bring pre-existing cron entries under management |
+| `/agentstatus` | tiny probe each | Live check: is each tier actually up right now? |
+| `/boundaries` | **0 tokens** | What the agent must never do |
+| `/cancel` | free | Abort a multi-step form (/start, /addserver) |
+| `/chatid` | free, no auth needed | Reveal the current chat's ID (for group/access setup) |
+| `/forget <n>` | free | Delete one wrong learned fact (numbers from `/learned`) |
 | `/gdrive` (disconnect) | owner/admin | Same card also disconnects an account: revokes access at Google, deletes the local token, deletes nothing in Drive |
 | `/gdrive` | owner/admin, **0 tokens** | Pick (or show) which connected Drive account this room uploads to |
 | `/gdrivefolder` | owner/admin, **0 tokens** | Pin this room's upload folder by browsing to it; `/gdrivefolder off` reverts |
+| `/gdrivestatus` | **0 tokens** | Is each connected Drive account still working? |
 | `/gdrivetarget` | owner/admin, **0 tokens** | Show/set which shared drive (or My Drive) this room's account writes to |
-| `/lang` (or `/language`) | owner/admin, **0 tokens** | Set/show this chat's language for the bot's own fixed replies (`en`/`id`) |
-| `/mode` | **0 tokens** | Read-only right now, or able to change things? |
-| `/unlock [min]` | owner/admin | Open a time-boxed window for real changes (capped at 10 min from a group) |
-| `/lock` | owner/admin | Close that window early |
-| `/registergroup` | admin only | Open this Telegram group to every member, no restart needed |
-| `/unregistergroup` | admin only | Revoke a group's access |
+| `/graduate <name>` | 1 call | Turn the case you *just* solved into a reusable script |
 | `/help` | free | Full in-chat guide -- bilingual, pick EN or ID (or `/help en` / `/help id` directly) |
+| `/lang` (or `/language`) | owner/admin, **0 tokens** | Set/show this chat's language for the bot's own fixed replies (`en`/`id`) |
+| `/learned` | free | What the agent worked out about this environment by itself |
+| `/lock` | owner/admin | Close that window early |
+| `/logout` | owner/admin | Clear a sign-in (Gemini or Claude) for a genuinely fresh /start |
+| `/mcpservers` | **0 tokens** | What MCP servers are registered |
+| `/memory` | free | View current memory contents |
+| `/mode` | **0 tokens** | Read-only right now, or able to change things? |
+| `/new` | free | Reset the active session's conversation history (MEMORY.md untouched) |
+| `/providers` | **0 tokens** | Which AI tiers are configured, and which are healthy |
+| `/registergroup` | admin only | Open this Telegram group to every member, no restart needed |
+| `/remember <fact>` | free | Save a fact permanently, read in every session & every tier |
+| `/removeserver <name>` | owner/admin | Unregister one |
+| `/rmboundary <n>` | owner/admin + PIN | Remove one |
+| `/rmgrouppin` | owner/admin, in that group | Remove that group's own PIN, falls back to the owner's |
+| `/rmmcp <name>` | owner/admin | Withdraw one (no PIN -- it only reduces capability) |
+| `/schedules` | **0 tokens** | Everything that runs on a timer, and what it does |
+| `/servers` | **0 tokens** | Machines the agent may reach |
+| `/session <name>` | free | Create/switch to a named session, for keeping cases separate |
+| `/sessions` | free | List saved sessions |
+| `/setbrief <one line>` | owner/admin | Say what this agent looks after (also the 4th item on `/start`) |
+| `/setchatscope <phrase>` | owner/admin | The role for **this chat only**, overriding `/setscope` here -- one deployment, a different job per room |
+| `/setgrouppin` | owner/admin, in that group | Set/change THAT group's own PIN |
+| `/setownerscope <text>` | owner, **own DM only** | Extra scope on top of `/setscope`, for the owner alone, in their own DM only -- never a group, even one the owner is speaking in |
+| `/setpin` | owner, DM **or group** | Set/change the OWNER's PIN -- works everywhere |
+| `/setscope <phrase>` | owner/admin | Change what KIND of assistant it is, not just what it manages |
+| `/snapshots` | **0 tokens** | Snapshots taken before changes |
+| `/status` | **0 tokens** | Instant status check straight from a script (see `tools/`), no model involved |
+| `/tools` | **0 tokens** | List of "graduated" skills (see below) |
+| `/unlock [min]` | owner/admin | Open a time-boxed window for real changes (capped at 10 min from a group) |
+| `/unregistergroup` | admin only | Revoke a group's access |
+| `/unschedule <name>` | owner + DM only | Remove a scheduled task |
+| `/update` | owner/admin + PIN | Check GitHub for a newer version and install it |
+| `/usemodel [name]` | owner/admin | Force a specific tier for this chat (Opus, Gemini Pro-high, ...); `auto` for the default chain |
 
 ### Graduated skills (`/graduate`)
 
