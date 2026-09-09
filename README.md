@@ -199,6 +199,45 @@ it isn't left open to anyone who can merely talk to the bot.
   multiple independent, resumable conversations, so picking up yesterday's case doesn't
   drag in today's unrelated context.
 
+## System requirements
+
+**Two architectures, both first-class: `amd64` and `arm64`.** `install.sh`
+detects the machine and fetches the right build of everything it provisions
+(rclone, yt-dlp); nothing here is amd64-only. Confirmed against the real
+download listings for both, not assumed -- an Ampere/Graviton VM, a Raspberry
+Pi, or an ordinary Intel/AMD box are all supported the same way.
+
+**OS:** Debian 12+ or Ubuntu 22.04+ (or a derivative with `apt-get`) is the
+tested, automatic path -- `install.sh` detects and installs every system
+package itself. Anything else (Alpine, Fedora, a container without `apt`)
+still runs the bot, but `install.sh` stops to list what to install by hand
+instead of doing it for you.
+
+**Python:** 3.10 or newer. 3.10 is `install.sh`'s own stated floor, and CI
+(`.github/workflows/tests.yml`) runs the full suite against 3.10, 3.11, 3.12,
+and 3.13 on every push to `master` -- so the floor is enforced, not just
+claimed.
+
+|  | Minimum | Recommended |
+|---|---|---|
+| **CPU** | 1 vCPU | 2 vCPU (4+ if you'll lean on video re-encoding -- see below) |
+| **RAM** | 1 GB | 2 GB+ |
+| **Disk** | ~2 GB free | 5-10 GB free |
+| **Network** | Outbound HTTPS to Telegram, Anthropic, Google, and GitHub (for `/update`) | Same, plus a stable link -- a flaky one is its own class of bug (see v0.2b.88 in `CHANGELOG.md`) |
+
+The bot itself is a single lightweight Python process, mostly idle between
+messages. What actually uses resources is what it shells out to: both AI
+CLIs run as their own Node.js processes while a turn is in flight, and video
+handling calls `ffmpeg` to re-encode anything over Telegram's 50MB bot limit
+-- **measured on this project's own server**, 90 seconds of 1080p takes about
+32 seconds on 12 cores. Fewer cores means proportionally longer, not a
+failure; a single low-power core will get there, just slowly. The minimum
+row is what keeps the bot itself and one CLI turn running without swapping;
+the recommended row is comfortable headroom for a second concurrent chat and
+the occasional video job. Neither figure is a hard gate anywhere in the code
+-- there's no check enforcing them, this is planning guidance, not a
+requirement `install.sh` verifies.
+
 ## Quickstart
 
 ```bash
