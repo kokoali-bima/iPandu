@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.2b.99 -- arm64 hosts can actually finish setup now
+
+Asked directly: can this run on an arm64 VM? Checked instead of guessed, and
+found two real gaps, both in code paths that only ever assumed amd64:
+
+- `ensure_rclone()` refused outright on anything but `x86_64`/`amd64`, even
+  though rclone has shipped an official `linux-arm64` static binary all
+  along (confirmed against the real listing at downloads.rclone.org before
+  writing a line of the fix). It now resolves the download URL per
+  architecture and only refuses when the architecture genuinely has no
+  build to fetch.
+- `install.sh` fetched yt-dlp's `yt-dlp_linux` asset unconditionally -- the
+  x86_64-only standalone binary (yt-dlp does ship `yt-dlp_linux_aarch64`,
+  confirmed against the real GitHub release assets). On an arm64 host that
+  downloaded and `chmod +x`'d without complaint and then could not run at
+  all, while the line meant to report the result --
+  `ok "yt-dlp $(yt-dlp --version 2>/dev/null || echo installed)"` -- let the
+  `||` swallow the exec-format error and print "installed" anyway. A real
+  install failure was reported as a success. Now picks the right asset for
+  `uname -m`, and the success line is gated on `yt-dlp --version` actually
+  succeeding -- a binary that can't run is removed, not left behind looking
+  installed.
+
+Everything else in the stack was already fine: the Python side has no
+compiled-code blockers, and both AI CLIs (Claude Code, Antigravity) install
+through the vendors' own official installers, which handle architecture
+detection themselves.
+
 ## v0.2b.98 -- one Drive root per deployment, and accounts shown by name
 
 Found while reviewing the just-merged multi-deployment work: `GDRIVE_ROOT` was
