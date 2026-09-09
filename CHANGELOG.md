@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.2b.98 -- one Drive root per deployment, and accounts shown by name
+
+Found while reviewing the just-merged multi-deployment work: `GDRIVE_ROOT` was
+a single fixed name, `iSmart-LA Data`, the same for every install. Two bots on
+one host sharing one connected Google account -- a real setup now that
+`SERVICE_NAME` makes that easy -- would silently write into the SAME root,
+distinguished only by each room's own subfolder, which collides outright the
+moment both bots ever serve a room with the same name.
+
+The root is now `iSmart-LA/<SERVICE_NAME>`, keyed by the same identity the
+multi-deployment work already uses to keep everything else (brief, sessions,
+PIN, servers) apart. An account that already holds the old flat folder is
+migrated automatically, once, the next time the bot starts: the whole tree --
+every room's subfolder, anything organized in there by hand -- moves in a
+single `rclone moveto`, never recreated file by file. The existence check
+this leans on had to be rebuilt too: `rclone lsd` on a nested path cannot be
+trusted to fail cleanly when that path does not exist -- Drive resolves it
+through its own name-based lookup, not a filesystem's -- so it is now decided
+by listing the PARENT and matching the last segment by name, the same
+strategy the connect-time check already used for the drive root itself.
+
+Also: **the `/gdrive` picker shows the account's own email now, not the
+rclone remote name it happened to be connected under.** `gdrive`,
+`gdrive_company` -- labels the operator chose at connect time -- meant
+nothing to whoever was tapping the button in a group chat. Looked up once,
+right after `/connectgdrive` verifies (the token is at its freshest then),
+straight from the Drive API's own `about?fields=user` -- the same call
+`rclone about` makes internally, just asked for identity instead of quota;
+rclone itself has no command for this, confirmed against its own `--help`
+output before reaching past it. Any account connected before this shipped is
+backfilled the first time `/gdrive` renders it, in the background, without
+delaying that reply. Falls back to the plain remote name on any failure --
+cosmetic only, never load-bearing.
+
 ## v0.2b.97 -- /setbrief replaces the role instead of stacking it
 
 Found on the live ops deployment, in its own brief. `set_brief_role()` patched

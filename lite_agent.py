@@ -324,7 +324,18 @@ SNAPSHOT_SCRIPT = BASE_DIR / "tools" / "cluster_snapshot.py"
 # just what runs once it already is connected. drive.file OAuth scope means
 # the connected account only ever exposes files rclone itself created.
 RCLONE_BIN = os.environ.get("RCLONE_BIN", "rclone")
-GDRIVE_ROOT = os.environ.get("GDRIVE_ROOT", "iSmart-LA Data")
+# Keyed by SERVICE_NAME (not the SERVICE_NAME constant -- that is defined
+# further down, and this runs at import time) so two deployments sharing
+# one connected Google account do not silently share one Drive root,
+# distinguished only by each room's own subfolder -- which collides
+# outright if both bots ever serve a room with the same name.
+GDRIVE_ROOT = os.environ.get(
+    "GDRIVE_ROOT",
+    f"iSmart-LA/{os.environ.get('SERVICE_NAME', 'lite-agent')}")
+# The old, flat, shared-by-every-deployment name. Kept ONLY so an account
+# that already has it can be migrated automatically -- never written to
+# again once _migrate_gdrive_root() has moved it.
+GDRIVE_LEGACY_ROOT = "iSmart-LA Data"
 
 # Bound rclone's OWN retrying. Left at its defaults (--retries 3 with
 # exponential backoff, --low-level-retries 10) a single transient 5xx from
@@ -3146,6 +3157,11 @@ def apply_hardening_on_start() -> None:
         harden_state_files()
     except Exception:
         logger.warning("state-file hardening failed on start", exc_info=True)
+
+    try:
+        migrate_gdrive_roots_on_start()
+    except Exception:
+        logger.warning("gdrive root migration failed on start", exc_info=True)
 
     try:
         status = refresh_systemd_unit()
@@ -8785,10 +8801,11 @@ def _gdrive_picker_rows(state: dict, lang: str) -> list[list[InlineKeyboardButto
 
 def _gdrive_picker_text(state: dict, lang: str) -> str:
     if state["step"] == "drive":
+        label = gdrive_account_label(state["account"])
         return _t(lang,
-            f"📁 <b>Where should {_tg_escape(state['account'])} upload?</b>\n\n"
+            f"📁 <b>Where should {_tg_escape(label)} upload?</b>\n\n"
             "Pick My Drive or a shared drive; you choose the folder inside it next.",
-            f"📁 <b>{_tg_escape(state['account'])} upload ke mana?</b>\n\n"
+            f"📁 <b>{_tg_escape(label)} upload ke mana?</b>\n\n"
             "Pilih My Drive atau shared drive; folder di dalamnya dipilih setelah ini.")
     where = state["drive_name"] or "My Drive"
     here = state["path"] or "/"
@@ -8975,13 +8992,24 @@ async def cmd_gdrive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     chat_id = str(update.effective_chat.id)
     explicit = _read_gdrive_room_accounts().get(chat_id)
     effective = _gdrive_effective_default(chat_id, accounts)
+
+    # Backfill for accounts connected before this existed: fire the lookup
+    # in the background and render with today's answer (the raw name, most
+    # likely) -- a Google round-trip has no business delaying this reply,
+    # and the next /gdrive after it lands will just show the label.
+    cached = _read_gdrive_labels()
+    loop = asyncio.get_running_loop()
+    for a in accounts:
+        if a not in cached:
+            loop.run_in_executor(None, _fetch_gdrive_account_email, a)
     lines = [_t(lang, "\U0001f4c1 <b>Google Drive account for this room</b>", "\U0001f4c1 <b>Akun Google Drive untuk room ini</b>"), ""]
     if explicit and explicit in accounts:
-        lines.append(_t(lang, f"Currently: <b>{_tg_escape(explicit)}</b>", f"Sekarang: <b>{_tg_escape(explicit)}</b>"))
+        lines.append(_t(lang, f"Currently: <b>{_tg_escape(gdrive_account_label(explicit))}</b>",
+                             f"Sekarang: <b>{_tg_escape(gdrive_account_label(explicit))}</b>"))
     elif effective:
         lines.append(_t(lang,
-            f"Using <b>{_tg_escape(effective)}</b> automatically -- the only account connected.",
-            f"Otomatis pakai <b>{_tg_escape(effective)}</b> -- satu-satunya akun yang terhubung.",
+            f"Using <b>{_tg_escape(gdrive_account_label(effective))}</b> automatically -- the only account connected.",
+            f"Otomatis pakai <b>{_tg_escape(gdrive_account_label(effective))}</b> -- satu-satunya akun yang terhubung.",
         ))
     else:
         lines.append(_t(lang,
@@ -8997,10 +9025,12 @@ async def cmd_gdrive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # ship. A syntax error at import is not a degraded feature; nothing runs.
     tick = "\u2705 "
     rows = [[InlineKeyboardButton(
-        f"{tick if a == effective else ''}{a}", callback_data=f"gdrv:use:{a}",
+        f"{tick if a == effective else ''}{gdrive_account_label(a)}",
+        callback_data=f"gdrv:use:{a}",
     )] for a in accounts]
     rows += [[InlineKeyboardButton(
-        _t(lang, f"Disconnect {a}", f"Putuskan {a}"), callback_data=f"gdrv:rm:{a}",
+        _t(lang, f"Disconnect {gdrive_account_label(a)}", f"Putuskan {gdrive_account_label(a)}"),
+        callback_data=f"gdrv:rm:{a}",
     )] for a in accounts]
     lines.append("")
     lines.append(_t(lang,
@@ -9375,6 +9405,185 @@ def _rclone_run(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
     found" on a host where the sign-in had just worked."""
     return subprocess.run([_rclone_path() or RCLONE_BIN, *args],
                           capture_output=True, text=True, timeout=timeout)
+
+
+def _gdrive_mkdirp(name: str, path: str) -> bool:
+    """Create every segment of `path` in order, not one rclone mkdir call for
+    the whole thing -- provable regardless of how many levels GDRIVE_ROOT
+    happens to have, rather than trusting a backend's own multi-level mkdir
+    to behave the same way on Drive as it does elsewhere."""
+    built = ""
+    for seg in path.split("/"):
+        if not seg:
+            continue
+        built = f"{built}/{seg}" if built else seg
+        mk = _rclone_run("mkdir", f"{name}:{built}", timeout=30)
+        if mk.returncode != 0:
+            logger.warning("gdrive: could not create %s:%s (%s)", name, built,
+                           (mk.stderr or mk.stdout or "").strip()[:200])
+            return False
+    return True
+
+
+def _gdrive_path_exists(name: str, path: str) -> bool:
+    """Does `path` exist on this remote -- checked by listing its PARENT and
+    looking for the last segment by name, the same strategy the connect-time
+    check has always used (a bare `lsd` on the drive root always succeeds,
+    whatever it contains; a specific path has to resolve through Drive's own
+    name-based lookup, which is not something to assume behaves like a
+    normal filesystem's missing-path error). Generalised here only so it
+    keeps working now that GDRIVE_ROOT has more than one segment."""
+    parent, _, leaf = path.rpartition("/")
+    listing = _rclone_run("lsd", f"{name}:{parent}" if parent else f"{name}:",
+                          timeout=30)
+    return listing.returncode == 0 and leaf in listing.stdout
+
+
+def _migrate_gdrive_root(name: str) -> tuple[Optional[str], bool]:
+    """Move this account's old flat GDRIVE_LEGACY_ROOT into the new
+    per-deployment GDRIVE_ROOT, if the old one exists and the new one does
+    not yet. Returns (status, root_exists_now) -- status is a short message
+    for the log, or None when there was nothing to do (the normal case on
+    every start after the first); root_exists_now answers the question this
+    already had to ask internally, so a caller never has to ask it again.
+
+    The whole tree moves in one `rclone moveto` -- every group's subfolder,
+    anything the operator organised in there by hand -- never recreated file
+    by file. Best-effort throughout: a Drive account that cannot be reached
+    right now is not a reason to fail startup, only to try again next time.
+    """
+    if GDRIVE_ROOT == GDRIVE_LEGACY_ROOT:
+        # SERVICE_NAME resolved to the legacy name; nothing to move, but the
+        # caller still needs to know whether it exists.
+        return None, _gdrive_path_exists(name, GDRIVE_ROOT)
+    try:
+        if _gdrive_path_exists(name, GDRIVE_ROOT):
+            return None, True  # already migrated (or never had the legacy folder)
+        if not _gdrive_path_exists(name, GDRIVE_LEGACY_ROOT):
+            return None, False  # a fresh account -- nothing legacy to bring forward
+
+        # moveto needs the new root's PARENT to already exist; the final
+        # segment is what moveto itself creates by renaming the old folder
+        # into place.
+        parent = "/".join(GDRIVE_ROOT.split("/")[:-1])
+        if parent and not _gdrive_mkdirp(name, parent):
+            return f"could not prepare {name}:{parent} for migration", False
+
+        mv = _rclone_run("moveto", f"{name}:{GDRIVE_LEGACY_ROOT}",
+                         f"{name}:{GDRIVE_ROOT}", timeout=120)
+        if mv.returncode != 0:
+            return (f"migration failed for {name}: " +
+                    (mv.stderr or mv.stdout or "").strip()[:200]), False
+
+        now_exists = _gdrive_path_exists(name, GDRIVE_ROOT)
+        if not now_exists:
+            return f"migration for {name} reported success but did not verify", False
+        return f"migrated {name}:{GDRIVE_LEGACY_ROOT} -> {name}:{GDRIVE_ROOT}", True
+    except Exception as exc:
+        return f"migration check failed for {name}: {exc}", False
+
+
+def migrate_gdrive_roots_on_start() -> None:
+    """Run _migrate_gdrive_root() for every connected account. Called from
+    apply_hardening_on_start() -- self-healing on every start, same as the
+    rest of that function, and a no-op the moment every account has moved."""
+    for name in _list_gdrive_accounts():
+        try:
+            status, _ = _migrate_gdrive_root(name)
+        except Exception:
+            logger.warning("gdrive root migration crashed for %s", name, exc_info=True)
+            continue
+        if status:
+            logger.warning("gdrive: %s", status)
+
+
+GDRIVE_LABELS_FILE = BASE_DIR / "gdrive_labels.json"
+
+
+def _read_gdrive_labels() -> dict:
+    if not GDRIVE_LABELS_FILE.exists():
+        return {}
+    try:
+        return json.loads(GDRIVE_LABELS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("gdrive_labels.json unreadable", exc_info=True)
+        return {}
+
+
+def _write_gdrive_labels(items: dict) -> None:
+    GDRIVE_LABELS_FILE.write_text(json.dumps(items, indent=2), encoding="utf-8")
+
+
+def gdrive_account_label(name: str) -> str:
+    """The button text for a connected account: the Google account's own
+    email once it has been looked up, otherwise the raw rclone remote name.
+
+    Read-only and instant -- this is called on every render of /gdrive and
+    the folder picker. The lookup that fills the cache runs separately (see
+    _fetch_gdrive_account_email) and only ever writes to it."""
+    return _read_gdrive_labels().get(name) or name
+
+
+def _rclone_token_for(name: str) -> Optional[dict]:
+    """This remote's stored OAuth token, straight out of rclone.conf.
+
+    Callers touch the remote first (a cheap `lsd`) so a token due for
+    refresh has already been renewed by rclone itself and written back --
+    rclone does that on any real use. Refreshing it a second time here would
+    mean re-deriving rclone's own client_id/secret handling, which belongs
+    to rclone, not to us.
+    """
+    if not RCLONE_CONF.exists():
+        return None
+    try:
+        text = RCLONE_CONF.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    section = re.search(rf"^\[{re.escape(name)}\]\n(.*?)(?=^\[|\Z)", text,
+                        re.MULTILINE | re.DOTALL)
+    if not section:
+        return None
+    tok = re.search(r"^token\s*=\s*(\{.*\})\s*$", section.group(1), re.MULTILINE)
+    if not tok:
+        return None
+    try:
+        return json.loads(tok.group(1))
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def _fetch_gdrive_account_email(name: str) -> Optional[str]:
+    """Ask Google who this account actually is, and cache the answer.
+
+    Best-effort throughout, on purpose: the label is cosmetic. A network
+    hiccup, a token that failed to refresh, an account whose scope predates
+    this feature -- none of it should surface as an error, only as the
+    remote name staying visible until the next successful lookup.
+    """
+    try:
+        touch = _rclone_run("lsd", f"{name}:", timeout=20)
+        if touch.returncode != 0:
+            return None
+        token = _rclone_token_for(name)
+        access = token.get("access_token") if token else None
+        if not access:
+            return None
+        req = urllib.request.Request(
+            "https://www.googleapis.com/drive/v3/about?fields=user",
+            headers={"Authorization": f"Bearer {access}"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        email = (data.get("user") or {}).get("emailAddress")
+        if not email:
+            return None
+        labels = _read_gdrive_labels()
+        labels[name] = email
+        _write_gdrive_labels(labels)
+        return email
+    except Exception:
+        logger.warning("gdrive: could not look up the account name for %s",
+                       name, exc_info=True)
+        return None
 
 
 RCLONE_AUTH_PORT = 53682          # rclone's own fixed loopback port
@@ -9963,17 +10172,12 @@ def connect_gdrive_account(name: str, token_raw: str,
     # future uploads across two "iSmart-LA Data" folders with nothing to
     # notice until files start landing in the wrong one.
     try:
-        listing = _rclone_run("lsd", f"{name}:", timeout=30)
-        if listing.returncode != 0:
+        migrated, root_exists = _migrate_gdrive_root(name)
+        if migrated:
+            logger.info("gdrive: %s", migrated)
+        if not root_exists and not _gdrive_mkdirp(name, GDRIVE_ROOT):
             rollback()
-            return False, "connected, but couldn't list the Drive root: " + \
-                (listing.stderr or listing.stdout or "").strip()[:300]
-        if GDRIVE_ROOT not in listing.stdout:
-            mk = _rclone_run("mkdir", f"{name}:{GDRIVE_ROOT}", timeout=30)
-            if mk.returncode != 0:
-                rollback()
-                return False, "connected, but couldn't create the data folder: " + \
-                    (mk.stderr or mk.stdout or "").strip()[:300]
+            return False, "connected, but couldn't create the data folder"
     except Exception as exc:
         rollback()
         return False, f"connected, but the folder check failed: {exc}"
@@ -9989,6 +10193,15 @@ def connect_gdrive_account(name: str, token_raw: str,
     except Exception as exc:
         rollback()
         return False, f"verification failed after setup: {exc}"
+
+    # Cosmetic, so never allowed to affect the outcome: the token is
+    # freshest right now, straight out of the OAuth flow that just issued
+    # it, which is the best chance this lookup ever gets.
+    try:
+        _fetch_gdrive_account_email(name)
+    except Exception:
+        logger.warning("gdrive: account-label lookup failed for %s", name,
+                       exc_info=True)
 
     return True, "connected and verified"
 

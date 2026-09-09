@@ -7,7 +7,7 @@ A report doesn't have to stop at the chat: it can land straight in a shared
 [Google Drive](#google-drive-optional) folder too, connected the same explicit way as
 everything else here -- through Telegram, not a config file.
 
-> **Status: v0.2b.97 -- early/beta.** Built and battle-tested against a real production
+> **Status: v0.2b.98 -- early/beta.** Built and battle-tested against a real production
 > Proxmox VE cluster over several days of iteration, including a live-fire test of the
 > unlock/PIN/snapshot flow against real infrastructure. Works well; still has known
 > rough edges (see [Known limitations](#known-limitations)).
@@ -642,10 +642,10 @@ Either way, once a token is in hand the bot:
 - picks a collision-free name (`gdrive` for the first account, asks for a short
   label like `company` or `clienta` for a second+ one -- becomes `gdrive_company`)
 - registers it with `rclone config create`, never by hand-editing `rclone.conf`
-- checks whether this account already has the shared `iSmart-LA Data` root folder
-  before creating one, so re-authorizing the same account by mistake (a typo'd
-  label, say) can't silently produce a second folder with nothing to notice until
-  files start landing in the wrong one
+- checks whether this account already has this deployment's own
+  `iSmart-LA/<bot name>` root folder before creating one, so re-authorizing the
+  same account by mistake (a typo'd label, say) can't silently produce a second
+  folder with nothing to notice until files start landing in the wrong one
 - **verifies** with a real listing before calling it connected -- reported success
   always means an actual Drive call worked, not that a file was written
 - rolls back cleanly (removes the half-configured remote) on any failure, so a
@@ -678,8 +678,8 @@ replies with a shareable link. Same secret-scan gate as sending a file through
 Telegram — a file containing a credential is refused, not uploaded.
 
 **In a group, uploads land inside that group's own subfolder automatically** —
-`iSmart-LA Data/<group name>/...` — without the model needing to know or add the
-group's name itself. Asking for the shared root instead (a path starting with `/`)
+`iSmart-LA/<bot name>/<group name>/...` — without the model needing to know or
+add the group's name itself. Asking for the shared root instead (a path starting with `/`)
 only works for that group's own admin (or the owner); anyone else's attempt is
 quietly kept inside the group's folder rather than refused outright, the same way
 an untrusted fact from a group is quietly not remembered rather than erroring. This
@@ -745,6 +745,26 @@ Limited Input devices" client cannot do the loopback redirect `rclone
 authorize` uses, so `/connectgdrive setupclient desktop` stores a second client
 in the same Google Cloud project, and the manual instructions attach it
 automatically once it exists.
+
+**Each deployment gets its own root, `iSmart-LA/<bot name>`, not one shared
+`iSmart-LA Data`.** Two bots on one host sharing a connected Google account —
+a real setup once `SERVICE_NAME` makes multiple deployments easy — used to
+write into the *same* root, told apart only by each room's own subfolder,
+which collides outright the moment both bots ever serve a room with the same
+name. An account that still has the old flat folder is migrated
+automatically, once, the next time the bot starts: the whole tree — every
+room's subfolder, anything organized in there by hand — moves in a single
+`rclone moveto`, never recreated file by file.
+
+**The `/gdrive` picker shows the account's own email, not the rclone remote
+name.** `gdrive`, `gdrive_company` — labels the *operator* chose when
+connecting each account — meant nothing to whoever was tapping the button in
+a group chat. Looked up once, right after `/connectgdrive` succeeds, straight
+from the Drive API (`about?fields=user`, the same call `rclone about` makes
+internally, just asked for identity instead of quota); any account connected
+before this shipped gets the same lookup the first time `/gdrive` renders it,
+in the background, without delaying the reply. Falls back to the plain
+remote name if the lookup can't complete — cosmetic only, never load-bearing.
 
 ### OPNsense (optional)
 
