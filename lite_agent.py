@@ -1179,6 +1179,40 @@ def parse_server_proposal(raw: str) -> Optional[dict]:
     return {"name": name, "host": host, "user": user, "port": port}
 
 
+# MCP: name=lovable | url=https://mcp.lovable.dev
+# MCP: name=reports | command=python | args=tools/mcp_readonly_fs.py /var/log
+MCP_LINE_RE = re.compile(r"^\s*MCP:\s*(.+?)\s*$", re.MULTILINE)
+
+def parse_mcp_proposal(raw: str) -> Optional[dict]:
+    fields: dict[str, str] = {}
+    for chunk in raw.split("|"):
+        if "=" not in chunk:
+            return None
+        k, _, v = chunk.partition("=")
+        fields[k.strip().lower()] = v.strip()
+    name = fields.get("name", "")
+    if not _MCP_NAME_RE.match(name):
+        return None
+    url = fields.get("url", "")
+    command = fields.get("command", "")
+    args_str = fields.get("args", "")
+    
+    if url and url.startswith("https://"):
+        return {"name": name, "type": "http", "url": url}
+    elif command:
+        return {"name": name, "type": "stdio", "command": command, "args": args_str.split()}
+    return None
+
+def extract_mcp_proposals(text: str) -> tuple[str, list[dict]]:
+    proposals = []
+    for raw in MCP_LINE_RE.findall(text):
+        parsed = parse_mcp_proposal(raw)
+        if parsed:
+            proposals.append(parsed)
+        else:
+            logger.warning("ignored malformed MCP: line: %s", raw[:120])
+    return MCP_LINE_RE.sub("", text).strip(), proposals
+
 def extract_server_proposals(text: str) -> tuple[str, list[dict]]:
     """Pull SERVER: lines out of a reply and strip them from what's shown."""
     proposals = []
@@ -4078,6 +4112,18 @@ Wait for the operator to explicitly request to add a server (never propose it ju
     SERVER: name=<slug> | host=<ip> | user=<user> | port=<port>
 
 They pick hypervisor or VM and confirm with a PIN. Only propose a verified host; do not repeat it.
+
+## Adding an MCP Server
+
+To register an MCP server (like Lovable, GitHub, Codex), do NOT edit any config files or run `claude mcp add` yourself! The system requires an interactive OAuth flow in Telegram. Wait for the operator's request, then propose it directly at the end of your reply:
+
+    MCP: name=<slug> | url=<url>
+
+For local stdio MCPs, use:
+
+    MCP: name=<slug> | command=<cmd> | args=<arg1 arg2...>
+
+The system will automatically intercept this and prompt the user to securely connect it.
 """
 
 
@@ -10801,6 +10847,27 @@ async def _pin_verified(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await _begin_addserver(update, query, prefill=(payload or {}).get("prefill"))
         return
 
+    if action == "auto_addmcp":
+        if payload not in _pending_mcp_props:
+            await query.answer(_t(lang, "Expired.", "Kedaluwarsa."), show_alert=True)
+            return
+        item = _pending_mcp_props[payload]
+        if pin_is_set(chat_id):
+            await request_pin(update, "addmcp", item, _t(lang,
+                f"\U0001f50c <b>Connecting {_tg_escape(item['name'])}</b>",
+                f"\U0001f50c <b>Menghubungkan {_tg_escape(item['name'])}</b>",
+            ))
+        else:
+            if item.get("type") == "http":
+                await _begin_mcp_http_login(update, query, item["name"], item["url"])
+            else:
+                register_mcp_server(item["name"], item["command"], item["args"])
+                await _safe_edit(query, _t(lang,
+                    f"\U0001f50c <b>{_tg_escape(item['name'])}</b> registered.\n\n",
+                    f"\U0001f50c <b>{_tg_escape(item['name'])}</b> terdaftar.\n\n",
+                ), parse_mode="HTML")
+        return
+
     if action == "auto_addserver":
         # Everything is already known -- host/user/port from the model's own
         # SERVER: line, kind (and flavour) from the buttons just tapped. The
@@ -11109,6 +11176,36 @@ async def offer_schedules(update: Update, proposals: list[dict]) -> None:
             ]]),
         )
 
+
+_pending_mcp_props: dict[str, dict] = {}
+
+async def offer_mcp_registration(update: Update, proposals: list[dict]) -> None:
+    lang = _chat_lang(update)
+    for item in proposals:
+        token = hashlib.sha256(
+            f"{item['name']}{_dt.datetime.now().timestamp()}".encode()
+        ).hexdigest()[:16]
+        _pending_mcp_props[token] = dict(item)
+        if item.get("type") == "http":
+            desc = f"<code>{_tg_escape(item['url'])}</code>"
+        else:
+            cmdline = f"{item['command']} {' '.join(item['args'])}".strip()
+            desc = f"<code>{_tg_escape(cmdline)}</code>"
+            
+        await _msg(update).reply_text(
+            _t(lang, f"\U0001f50c <b>New MCP: {_tg_escape(item['name'])}</b>\n\n",
+                     f"\U0001f50c <b>MCP baru: {_tg_escape(item['name'])}</b>\n\n")
+            + f"{desc}\n\n"
+            + _t(lang, "Register it in /mcpservers?", "Daftarkan ke /mcpservers?"),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    _t(lang, f"Connect {_tg_escape(item['name'])} (PIN)",
+                             f"Hubungkan {_tg_escape(item['name'])} (PIN)"),
+                    callback_data=f"auto_addmcp:{token}"
+                )
+            ]])
+        )
 
 async def offer_server_registration(update: Update, proposals: list[dict]) -> None:
     """Ask before registering a host the model just made reachable.
@@ -13179,6 +13276,7 @@ async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     reply_text = result.get("result") or _t(lang, "(no response)", "(tidak ada respons)")
     reply_text, learned_facts = extract_learned(reply_text)
     reply_text, schedule_proposals = extract_schedules(reply_text)
+    reply_text, mcp_proposals = extract_mcp_proposals(reply_text)
     reply_text, server_proposals = extract_server_proposals(reply_text)
     reply_text, snapshots_taken = extract_snapshots(reply_text)
     reply_text, needs_write = extract_needs_write(reply_text)
@@ -13228,6 +13326,10 @@ async def _run_turn_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, te
                     "ignored %d SCHEDULE: proposal(s) from an origin not allowed to manage schedules (chat=%s)",
                     len(schedule_proposals), chat_id,
                 )
+            if mcp_proposals and await _may_authorize_group_action(update, context):
+                await offer_mcp_registration(update, mcp_proposals)
+            elif mcp_proposals:
+                logger.warning("ignored %d MCP: proposal(s)", len(mcp_proposals))
             if server_proposals and await _may_authorize_group_action(update, context):
                 await offer_server_registration(update, server_proposals)
             elif server_proposals:
