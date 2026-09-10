@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # ------------------------------------------------------------------------------
 # iPandu -- Copyright (c) 2026 Infrasoft.cloud & BSCloud.id Team.
 # See LICENSE. Any deployment or redistribution of this software must retain
@@ -7041,6 +7041,73 @@ async def _handle_wizard_input(update: Update, context: ContextTypes.DEFAULT_TYP
     state = _wizard.get(chat_id)
     if not state:
         return False
+
+    # MCP HTTP OAuth code handler
+    step = state.get("step", "")
+    if step.startswith("await_code_mcp_"):
+        lang = _chat_lang(update)
+        if state["expires"] < _dt.datetime.now().timestamp():
+            _wizard.pop(chat_id, None)
+            state["handle"].kill()
+            await _msg(update).reply_text(_t(lang,
+                "\u231b That OAuth flow expired. Run /addmcp again to retry.",
+                "\u231b OAuth itu sudah kedaluwarsa. Jalankan /addmcp lagi untuk coba lagi.",
+            ))
+            return True
+        text = (_msg(update).text or "").strip()
+        if text.lower() in ("/cancel", "cancel", "batal"):
+            _wizard.pop(chat_id, None)
+            state["handle"].kill()
+            await _msg(update).reply_text(_t(lang,
+                "\u2716\ufe0f MCP connection cancelled.",
+                "\u2716\ufe0f Koneksi MCP dibatalkan.",
+            ))
+            return True
+        handle = state["handle"]
+        mcp_name = state["mcp_name"]
+        mcp_url = state["mcp_url"]
+        human = state["human"]
+        _wizard.pop(chat_id, None)
+        await _msg(update).reply_text(_t(lang,
+            f"\u23f3 Sending code to {_tg_escape(human)}\u2026",
+            f"\u23f3 Mengirim kode ke {_tg_escape(human)}\u2026",
+        ))
+        try:
+            await _msg(update).delete()
+        except Exception:
+            pass
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, handle.send_code, text)
+            ok, screen = await loop.run_in_executor(None, handle.wait_for_result, 120)
+        except Exception as exc:
+            logger.exception("MCP HTTP login completion failed for %s", mcp_name)
+            handle.kill()
+            await _msg(update).reply_text(_t(lang,
+                f"\u26a0\ufe0f Connection failed: {exc}",
+                f"\u26a0\ufe0f Koneksi gagal: {exc}",
+            ))
+            return True
+        handle.kill()
+        if ok:
+            register_mcp_http_server(mcp_name, mcp_url)
+            logger.warning("MCP HTTP %s connected by user=%s", mcp_name, update.effective_user.id)
+            await _msg(update).reply_text(_t(lang,
+                f"\u2705 <b>{_tg_escape(mcp_name)}</b> connected and ready.\n\n"
+                "<i>Takes effect on the next new conversation -- /new applies it now.</i>",
+                f"\u2705 <b>{_tg_escape(mcp_name)}</b> terhubung dan siap digunakan.\n\n"
+                "<i>Berlaku di percakapan baru berikutnya -- /new untuk langsung terapkan.</i>",
+            ), parse_mode="HTML")
+        else:
+            await _msg(update).reply_text(_t(lang,
+                f"\u26a0\ufe0f The code wasn't accepted by {_tg_escape(human)}.\n"
+                "It may have expired -- try /addmcp again for a fresh URL.\n\n"
+                f"<pre>{_tg_escape(screen[-400:])}</pre>",
+                f"\u26a0\ufe0f Kode tidak diterima oleh {_tg_escape(human)}.\n"
+                "Mungkin sudah kedaluwarsa -- coba /addmcp lagi untuk URL baru.\n\n"
+                f"<pre>{_tg_escape(screen[-400:])}</pre>",
+            ), parse_mode="HTML")
+        return True
     lang = _chat_lang(update)
 
     if state.get("step") == "await_brief":
@@ -7453,24 +7520,59 @@ async def cmd_addmcp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "🔒 Bot owner or a group admin only.", "🔒 Cuma pemilik bot atau admin grup."))
 
     args = context.args or []
+
+    # ---- HTTP Remote MCP: /addmcp <name> --url <url> ----
+    if len(args) == 3 and args[1] == "--url" and args[2].startswith("https://"):
+        name, url = args[0], args[2]
+        if not _MCP_NAME_RE.match(name):
+            return await update.message.reply_text(_t(lang,
+                "Name must be letters, numbers, hyphens or underscores only.",
+                "Nama hanya boleh huruf, angka, tanda hubung, atau garis bawah."))
+        if name in read_mcp_servers():
+            return await update.message.reply_text(_t(lang,
+                f"'{name}' is already registered -- /rmmcp it first to replace.",
+                f"'{name}' sudah terdaftar -- /rmmcp dulu untuk mengganti."))
+        payload = {"name": name, "url": url, "type": "http"}
+        if pin_is_set(update.effective_chat.id):
+            await request_pin(update, "addmcp", payload, _t(lang,
+                f"\U0001f310 Connecting HTTP MCP <b>{_tg_escape(name)}</b>\n"
+                f"<code>{_tg_escape(url)}</code>\n\n"
+                "This will open an OAuth login so the agent can access this "
+                "service on your behalf.",
+                f"\U0001f310 Menghubungkan MCP HTTP <b>{_tg_escape(name)}</b>\n"
+                f"<code>{_tg_escape(url)}</code>\n\n"
+                "Ini akan membuka login OAuth agar agent bisa mengakses layanan "
+                "ini atas nama Anda.",
+            ))
+        else:
+            await _begin_mcp_http_login(update, None, name, url)
+        return
+
+    # ---- Stdio MCP: /addmcp <name> <command> [args...] ----
     if len(args) < 2 or not _MCP_NAME_RE.match(args[0]):
         existing = ", ".join(sorted(read_mcp_servers())) or _t(lang, "(none yet)", "(belum ada)")
         return await update.message.reply_text(_t(lang,
-            "Usage: <code>/addmcp &lt;name&gt; &lt;command&gt; [args...]</code>\n\n"
-            "<b>Ready-to-use default</b> -- stdlib only, no pip/npx install, read-only, "
-            "locked to one folder, costs nothing to run:\n"
+            "<b>Usage:</b>\n"
+            "  HTTP:  <code>/addmcp &lt;name&gt; --url https://mcp.example.com</code>\n"
+            "  Stdio: <code>/addmcp &lt;name&gt; &lt;command&gt; [args...]</code>\n\n"
+            "<b>HTTP examples (AI services, need OAuth):</b>\n"
+            "<pre>/addmcp lovable-personal --url https://mcp.lovable.dev\n"
+            "/addmcp lovable-team     --url https://mcp.lovable.dev\n"
+            "/addmcp github           --url https://mcp.github.com\n"
+            "/addmcp codex            --url https://mcp.openai.com</pre>\n"
+            "<b>Stdio example (local, no login):</b>\n"
             f"<pre>/addmcp reports {_tg_escape(_MCP_EXAMPLE)}</pre>\n"
-            "Gives the model two tools scoped to that one folder: list its files, read "
-            "one. Nothing outside it is ever reachable -- see "
-            "<code>tools/mcp_readonly_fs.py</code>'s own docstring for exactly how.\n\n"
             f"Currently registered: {existing}",
-            "Pakai: <code>/addmcp &lt;nama&gt; &lt;perintah&gt; [argumen...]</code>\n\n"
-            "<b>Default siap pakai</b> -- cuma stdlib, tidak perlu install pip/npx, "
-            "read-only, terkunci ke satu folder, tidak ada biaya jalan:\n"
+            "<b>Penggunaan:</b>\n"
+            "  HTTP:  <code>/addmcp &lt;nama&gt; --url https://mcp.example.com</code>\n"
+            "  Stdio: <code>/addmcp &lt;nama&gt; &lt;perintah&gt; [argumen...]</code>\n\n"
+            "<b>Contoh HTTP (layanan AI, butuh OAuth):</b>\n"
+            "<pre>/addmcp lovable-personal --url https://mcp.lovable.dev\n"
+            "/addmcp lovable-team     --url https://mcp.lovable.dev\n"
+            "/addmcp github           --url https://mcp.github.com\n"
+            "/addmcp codex            --url https://mcp.openai.com</pre>\n"
+            "<b>Contoh Stdio (lokal, tanpa login):</b>\n"
             f"<pre>/addmcp reports {_tg_escape(_MCP_EXAMPLE)}</pre>\n"
-            "Kasih model dua tool terbatas ke satu folder itu: lihat isinya, baca satu "
-            "file. Di luar folder itu tidak pernah terjangkau -- lihat docstring "
-            "<code>tools/mcp_readonly_fs.py</code> untuk detail caranya.\n\n"
             f"Terdaftar sekarang: {existing}",
         ), parse_mode="HTML")
 
@@ -7507,6 +7609,102 @@ async def cmd_addmcp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         ), parse_mode="HTML")
 
 
+
+
+async def _begin_mcp_http_login(update: Update, query, name: str, url: str) -> None:
+    """Start an OAuth flow for an HTTP Remote MCP server via claude mcp add.
+
+    Uses the same tmux + LoginHandle machinery as Claude/AGY login:
+    1. Run `claude mcp add --transport http <name> <url>` in a tmux pane.
+    2. Wait for an OAuth URL to appear in the pane output.
+    3. Send the URL to Telegram so the operator can open it in a browser.
+    4. Wait for the operator to paste the code back; forward it to tmux.
+    5. On success: write to mcp_servers.json and sync to agy.
+    """
+    lang = _chat_lang(update)
+
+    async def _reply(msg, **kw):
+        if query:
+            await _safe_edit(query, msg, **kw)
+        else:
+            await _msg(update).reply_text(msg, **kw)
+
+    if not tmux_available():
+        await _reply(_t(lang,
+            "\u26a0\ufe0f tmux isn't installed -- needed to drive the OAuth screen.\n"
+            "Install it (<code>apt install tmux</code>) and try again.",
+            "\u26a0\ufe0f tmux belum terpasang -- dibutuhkan untuk layar OAuth.\n"
+            "Pasang dulu (<code>apt install tmux</code>) lalu coba lagi.",
+        ), parse_mode="HTML")
+        return
+
+    human = f"MCP:{name}"
+    cmd = [CLAUDE_BIN, "mcp", "add", "--transport", "http", name, url]
+    handle = LoginHandle(session=f"ipandu-login-mcp-{name}", command=cmd)
+    await _reply(_t(lang,
+        f"\u23f3 Starting OAuth for <b>{_tg_escape(name)}</b>\u2026",
+        f"\u23f3 Memulai OAuth untuk <b>{_tg_escape(name)}</b>\u2026",
+    ), parse_mode="HTML")
+
+    try:
+        handle.start()
+        oauth_url = await asyncio.get_running_loop().run_in_executor(
+            None, handle.wait_for_url, 45)
+    except Exception as exc:
+        logger.exception("MCP HTTP login start failed for %s", name)
+        await _reply(_t(lang,
+            f"\u26a0\ufe0f Couldn't start the OAuth flow: {exc}",
+            f"\u26a0\ufe0f Gagal memulai OAuth: {exc}",
+        ))
+        return
+
+    chat_id = update.effective_chat.id
+
+    if oauth_url is None:
+        screen = handle.pane()
+        handle.kill()
+        if LoginHandle.already_done(screen):
+            register_mcp_http_server(name, url)
+            await _reply(_t(lang,
+                f"\u2705 <b>{_tg_escape(name)}</b> connected (already authenticated).\n\n"
+                "<i>Takes effect on the next new conversation -- /new applies it now.</i>",
+                f"\u2705 <b>{_tg_escape(name)}</b> terhubung (sudah terautentikasi).\n\n"
+                "<i>Berlaku di percakapan baru berikutnya -- /new untuk langsung terapkan.</i>",
+            ), parse_mode="HTML")
+        else:
+            await _reply(_t(lang,
+                f"\u26a0\ufe0f Couldn't find an OAuth URL for <b>{_tg_escape(name)}</b>.\n\n"
+                f"Last output:\n<pre>{_tg_escape(screen[-500:])}</pre>\n\n"
+                "Try again with /addmcp.",
+                f"\u26a0\ufe0f Tidak ketemu URL OAuth untuk <b>{_tg_escape(name)}</b>.\n\n"
+                f"Output terakhir:\n<pre>{_tg_escape(screen[-500:])}</pre>\n\n"
+                "Coba lagi dengan /addmcp.",
+            ), parse_mode="HTML")
+        return
+
+    _wizard[chat_id] = {
+        "step": f"await_code_mcp_{name}",
+        "handle": handle,
+        "human": human,
+        "mcp_name": name,
+        "mcp_url": url,
+        "expires": _dt.datetime.now().timestamp() + WIZARD_TTL_SECONDS,
+    }
+
+    safe_url = _tg_escape(oauth_url)
+    await _reply(_t(lang,
+        f"\U0001f517 <b>Connect {_tg_escape(name)}</b>\n\n"
+        f"1. Copy this link and open it in a browser:\n<code>{safe_url}</code>\n\n"
+        "2. Approve access, then copy the code you receive back.\n"
+        "3. <b>Send that code here as your next message.</b>\n\n"
+        "<i>The code is single-use and expires quickly. Send /cancel to stop.</i>",
+        f"\U0001f517 <b>Hubungkan {_tg_escape(name)}</b>\n\n"
+        f"1. Salin link ini dan buka di browser:\n<code>{safe_url}</code>\n\n"
+        "2. Setujui aksesnya, lalu salin kode yang muncul.\n"
+        "3. <b>Kirim kode itu di sini sebagai pesan berikutnya.</b>\n\n"
+        "<i>Kodenya sekali-pakai dan cepat kedaluwarsa. Kirim /cancel untuk berhenti.</i>",
+    ), parse_mode="HTML", disable_web_page_preview=True)
+
 async def cmd_rmmcp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """No PIN -- removing a server only ever REDUCES the model's tool surface,
     the same direction /removeserver and /addboundary already leave free."""
@@ -7540,10 +7738,22 @@ async def cmd_mcpservers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "Belum ada server MCP terdaftar. /addmcp untuk menambah -- jalankan "
             "kosong untuk contoh siap pakai.",
         ))
-    lines = [_t(lang, "🔌 <b>MCP servers</b>", "🔌 <b>Server MCP</b>"), ""]
-    for name, spec in sorted(servers.items()):
-        cmdline = f"{spec.get('command', '?')} {' '.join(spec.get('args', []))}".strip()
-        lines.append(f"• <b>{_tg_escape(name)}</b> — <code>{_tg_escape(cmdline)}</code>")
+    http_svrs = {n: s for n, s in servers.items() if s.get("type") == "http"}
+    stdio_svrs = {n: s for n, s in servers.items() if s.get("type") != "http"}
+    lines = [_t(lang, "🔌 <b>MCP Servers</b>", "🔌 <b>Server MCP</b>")]
+    if http_svrs:
+        lines.append("")
+        lines.append(_t(lang, "🌐 <b>HTTP Remote (OAuth):</b>",
+                         "🌐 <b>HTTP Remote (OAuth):</b>"))
+        for n, s in sorted(http_svrs.items()):
+            lines.append(f"• <b>{_tg_escape(n)}</b> → <code>{_tg_escape(s.get('url', '?'))}</code>")
+    if stdio_svrs:
+        lines.append("")
+        lines.append(_t(lang, "⚙️ <b>Stdio (local):</b>",
+                         "⚙️ <b>Stdio (lokal):</b>"))
+        for n, s in sorted(stdio_svrs.items()):
+            cmdline = f"{s.get('command', '?')} {' '.join(s.get('args', []))}".strip()
+            lines.append(f"• <b>{_tg_escape(n)}</b> — <code>{_tg_escape(cmdline)}</code>")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
@@ -10621,13 +10831,17 @@ async def _pin_verified(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     if action == "addmcp":
-        register_mcp_server(payload["name"], payload["command"], payload["args"])
-        await _safe_edit(query, _t(lang,
-            f"🔌 <b>{_tg_escape(payload['name'])}</b> registered.\n\n"
-            "<i>Takes effect on the next new conversation -- /new applies it now.</i>",
-            f"🔌 <b>{_tg_escape(payload['name'])}</b> terdaftar.\n\n"
-            "<i>Berlaku di percakapan baru berikutnya -- /new untuk langsung terapkan.</i>",
-        ), parse_mode="HTML")
+        if payload.get("type") == "http":
+            # HTTP Remote MCP: launch OAuth flow after PIN confirmed
+            await _begin_mcp_http_login(update, query, payload["name"], payload["url"])
+        else:
+            register_mcp_server(payload["name"], payload["command"], payload["args"])
+            await _safe_edit(query, _t(lang,
+                f"🔌 <b>{_tg_escape(payload['name'])}</b> registered.\n\n"
+                "<i>Takes effect on the next new conversation -- /new applies it now.</i>",
+                f"🔌 <b>{_tg_escape(payload['name'])}</b> terdaftar.\n\n"
+                "<i>Berlaku di percakapan baru berikutnya -- /new untuk langsung terapkan.</i>",
+            ), parse_mode="HTML")
         return
 
     if action == "schedule_install":
