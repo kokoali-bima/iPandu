@@ -193,7 +193,7 @@ except Exception:
     cfg = {}
 perms = cfg.setdefault("permissions", {})
 perms["allow"] = sorted(set(perms.get("allow", [])) | {
-    "command(*)", "read_file(*)", "write_file(*)"
+    "command(*)", "read_file(*)", "write_file(*)", "mcp(*)"
 })
 # Bare command names only: agy silently ignores wildcard deny patterns
 # (command(rm *) let rm through; command(rm) blocked it -- established by

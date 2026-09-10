@@ -2870,11 +2870,44 @@ def _sync_agy_mcp(argv: list[str]) -> None:
         logger.warning("could not reach agy to sync MCP config", exc_info=True)
 
 
+def _ensure_agy_mcp_permission() -> None:
+    settings_path = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
+    try:
+        if settings_path.exists():
+            cfg = json.loads(settings_path.read_text(encoding="utf-8"))
+        else:
+            cfg = {}
+        perms = cfg.setdefault("permissions", {})
+        allow = set(perms.get("allow", []))
+        if "mcp(*)" not in allow:
+            allow.add("mcp(*)")
+            perms["allow"] = sorted(allow)
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            settings_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    except Exception:
+        logger.warning("could not update agy permissions for mcp", exc_info=True)
+
+
+def _get_claude_mcp_token(name: str) -> Optional[str]:
+    creds_path = Path.home() / ".claude" / ".credentials.json"
+    if not creds_path.exists():
+        return None
+    try:
+        data = json.loads(creds_path.read_text(encoding="utf-8"))
+        for k, v in data.get("mcpOAuth", {}).items():
+            if name in k and v.get("accessToken"):
+                return v["accessToken"]
+    except Exception:
+        pass
+    return None
+
+
 def register_mcp_server(name: str, command: str, args: list[str]) -> None:
     servers = read_mcp_servers()
     servers[name] = {"command": command, "args": args}
     _write_mcp_servers(servers)
     logger.warning("MCP server registered: %s -> %s %s", name, command, " ".join(args))
+    _ensure_agy_mcp_permission()
     _sync_agy_mcp(["add", name, command, *args])
 
 
@@ -2888,7 +2921,13 @@ def register_mcp_http_server(name: str, url: str) -> None:
                        capture_output=True, text=True, timeout=15)
     except Exception:
         pass
-    _sync_agy_mcp(["add", "--transport", "http", name, url])
+
+    _ensure_agy_mcp_permission()
+    token = _get_claude_mcp_token(name)
+    if token:
+        _sync_agy_mcp(["add", "--header", f"Authorization: Bearer {token}", name, url])
+    else:
+        _sync_agy_mcp(["add", name, url])
 
 
 def remove_mcp_server(name: str) -> bool:
