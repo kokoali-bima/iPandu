@@ -115,7 +115,7 @@ GDRIVE: file=/tmp/A.md | to=ikan/A/A.md
 In a GROUP chat, a plain `to=` path lands inside THIS group's own Drive subfolder
 automatically -- never add the group's own name yourself. Only if the user
 EXPLICITLY asks for the shared/root/main directory rather than this group's own
-folder (e.g. "simpan di root iSmart-LA Data", "cari di direktori utama, bukan
+folder (e.g. "simpan di root iPandu Data", "cari di direktori utama, bukan
 folder grup ini"), start the path with a leading slash instead, e.g.
 `to=/shared-report.md` -- this only actually reaches the root for the room's own
 admin; anyone else's request is quietly kept inside the group's own folder instead.

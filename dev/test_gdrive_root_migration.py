@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Each deployment gets its own Drive root, and an existing one migrates.
 
-GDRIVE_ROOT was one fixed name ("iSmart-LA Data") for every install. Two bots
+GDRIVE_ROOT was one fixed name ("iPandu Data") for every install. Two bots
 on one host sharing one connected Google account -- a real setup now that the
 just-merged SERVICE_NAME work makes multi-deployment easy -- would silently
 write into the SAME root, distinguished only by each room's own subfolder,
 which collides outright if both bots ever serve a room with the same name.
 
-The root is now "iSmart-LA/<SERVICE_NAME>". An account already holding the old
+The root is now "iPandu/<SERVICE_NAME>". An account already holding the old
 flat folder is migrated automatically, once, on the next start: the whole
 tree -- moves in one `rclone moveto`, never recreated file by file.
 
@@ -60,9 +60,9 @@ def rc(stdout="", stderr="", code=0):
 
 # --- the root is keyed by SERVICE_NAME, not one fixed name ------------------
 check("GDRIVE_ROOT is per-deployment, built from SERVICE_NAME",
-      mod.GDRIVE_ROOT == "iSmart-LA/lite-agent-test")
+      mod.GDRIVE_ROOT == "iPandu/lite-agent-test")
 check("GDRIVE_LEGACY_ROOT keeps the old flat name, for migration only",
-      mod.GDRIVE_LEGACY_ROOT == "iSmart-LA Data")
+      mod.GDRIVE_LEGACY_ROOT == "iPandu Data")
 check("the two are different -- there is actually something to migrate FROM",
       mod.GDRIVE_ROOT != mod.GDRIVE_LEGACY_ROOT)
 
@@ -74,27 +74,27 @@ def test_path_exists():
 
     def fake(*args, timeout=60):
         calls.append(args)
-        if args[0] == "lsd" and args[1].endswith(":iSmart-LA"):
+        if args[0] == "lsd" and args[1].endswith(":iPandu"):
             return rc(stdout="lite-agent-test\nother-bot\n", code=0)
         if args[0] == "lsd" and args[1].endswith(":"):
-            return rc(stdout="iSmart-LA\nSomeOtherFolder\n", code=0)
+            return rc(stdout="iPandu\nSomeOtherFolder\n", code=0)
         return rc(code=1, stderr="not found")
 
     with patch.object(mod, "_rclone_run", side_effect=fake):
         check("a nested path is found via its PARENT's listing",
-              mod._gdrive_path_exists("gdrive", "iSmart-LA/lite-agent-test"))
+              mod._gdrive_path_exists("gdrive", "iPandu/lite-agent-test"))
         check("...and a sibling that isn't listed is correctly absent",
-              not mod._gdrive_path_exists("gdrive", "iSmart-LA/some-other-service"))
+              not mod._gdrive_path_exists("gdrive", "iPandu/some-other-service"))
         check("a top-level path is found by listing the bare drive root",
-              mod._gdrive_path_exists("gdrive", "iSmart-LA"))
+              mod._gdrive_path_exists("gdrive", "iPandu"))
         check("...and one that was never created is correctly absent",
-              not mod._gdrive_path_exists("gdrive", "iSmart-LA Data"))
+              not mod._gdrive_path_exists("gdrive", "iPandu Data"))
 
     def broken(*args, timeout=60):
         return rc(code=1, stderr="account suspended")
     with patch.object(mod, "_rclone_run", side_effect=broken):
         check("a parent listing that fails outright means 'does not exist', "
-              "not a crash", not mod._gdrive_path_exists("gdrive", "iSmart-LA/x"))
+              "not a crash", not mod._gdrive_path_exists("gdrive", "iPandu/x"))
 
 
 test_path_exists()
@@ -104,7 +104,7 @@ test_path_exists()
 def test_migrate():
     # 1. already migrated (or never had the legacy folder) -- a no-op
     def already_there(*args, timeout=60):
-        if args[1].endswith(":iSmart-LA"):
+        if args[1].endswith(":iPandu"):
             return rc(stdout="lite-agent-test\n", code=0)
         return rc(stdout="", code=1)
     with patch.object(mod, "_rclone_run", side_effect=already_there):
@@ -127,22 +127,22 @@ def test_migrate():
     # fake Drive, since mkdir/moveto have to actually change what a later lsd
     # reports, the same way real rclone would.
     calls = []
-    state = {"iSmart-LA": False, "moved": False}
+    state = {"iPandu": False, "moved": False}
     def has_legacy(*args, timeout=60):
         calls.append(args)
-        if args[0] == "mkdir" and args[1].endswith(":iSmart-LA"):
-            state["iSmart-LA"] = True
+        if args[0] == "mkdir" and args[1].endswith(":iPandu"):
+            state["iPandu"] = True
             return rc(code=0)
         if args[0] == "moveto":
             state["moved"] = True
             return rc(code=0)
-        if args[0] == "lsd" and args[1].endswith(":iSmart-LA"):
-            if not state["iSmart-LA"]:
+        if args[0] == "lsd" and args[1].endswith(":iPandu"):
+            if not state["iPandu"]:
                 return rc(stdout="", code=1)              # parent doesn't exist yet
             return rc(stdout="lite-agent-test\n" if state["moved"] else "",
                       code=0)                             # parent exists; child once moved
         if args[0] == "lsd" and args[1].endswith(":"):
-            return rc(stdout="iSmart-LA Data\n" if not state["moved"] else "",
+            return rc(stdout="iPandu Data\n" if not state["moved"] else "",
                       code=0)                              # legacy, until it's moved away
         return rc(code=1)
     with patch.object(mod, "_rclone_run", side_effect=has_legacy):
@@ -150,11 +150,11 @@ def test_migrate():
     check("a real migration reports success", status is not None
           and "migrated" in status.lower())
     check("...confirms the new root now exists", exists is True)
-    check("...the parent (iSmart-LA) is created before the move",
-          any(c[0] == "mkdir" and c[1].endswith(":iSmart-LA") for c in calls))
+    check("...the parent (iPandu) is created before the move",
+          any(c[0] == "mkdir" and c[1].endswith(":iPandu") for c in calls))
     check("...moveto carries the WHOLE tree in one call, not file by file",
-          any(c[0] == "moveto" and c[1].endswith(":iSmart-LA Data")
-              and c[2].endswith(":iSmart-LA/lite-agent-test") for c in calls))
+          any(c[0] == "moveto" and c[1].endswith(":iPandu Data")
+              and c[2].endswith(":iPandu/lite-agent-test") for c in calls))
     mkdir_i = next(i for i, c in enumerate(calls) if c[0] == "mkdir")
     move_i = next(i for i, c in enumerate(calls) if c[0] == "moveto")
     check("...and the parent is created BEFORE the move, not after",
@@ -162,10 +162,10 @@ def test_migrate():
 
     # a move that fails is reported, not silently swallowed
     def move_fails(*args, timeout=60):
-        if args[0] == "lsd" and args[1].endswith(":iSmart-LA"):
+        if args[0] == "lsd" and args[1].endswith(":iPandu"):
             return rc(stdout="", code=1)
         if args[0] == "lsd" and args[1].endswith(":"):
-            return rc(stdout="iSmart-LA Data\n", code=0)
+            return rc(stdout="iPandu Data\n", code=0)
         if args[0] == "mkdir":
             return rc(code=0)
         if args[0] == "moveto":
@@ -182,7 +182,7 @@ def test_migrate():
     with patch.object(mod, "GDRIVE_ROOT", mod.GDRIVE_LEGACY_ROOT):
         def legacy_is_current(*args, timeout=60):
             if args[1].endswith(":"):
-                return rc(stdout="iSmart-LA Data\n", code=0)
+                return rc(stdout="iPandu Data\n", code=0)
             return rc(code=1)
         with patch.object(mod, "_rclone_run", side_effect=legacy_is_current):
             status, exists = mod._migrate_gdrive_root("gdrive")

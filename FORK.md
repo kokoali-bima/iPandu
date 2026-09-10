@@ -1,13 +1,13 @@
-# iPandu and iSmart-LA — how the two repos relate
+# iPandu and iPandu — how the two repos relate
 
 iPandu is an **experimental fork** of
-[iSmart-LA](https://github.com/kokoali-bima/iSmart-LA). The two share roughly
+[iPandu](https://github.com/kokoali-bima/iPandu). The two share roughly
 **79% of the code**: Telegram plumbing, model failover, sessions, memory, media,
 Drive, scheduling, the update mechanism, bilingual replies, cost control.
 
 Fork point: **v0.2b.76** (`95578c7`), 5 September 2026.
 
-| | iSmart-LA | iPandu |
+| | iPandu | iPandu |
 |---|---|---|
 | Role | **production** — infrastructure agent | **experiment** — AI assistant |
 | Stability | guarded, released carefully | free to break |
@@ -16,18 +16,18 @@ Fork point: **v0.2b.76** (`95578c7`), 5 September 2026.
 | SSH keys | cluster key | **its own keypair** |
 
 The split is not because the code differs. It is because the two have
-incompatible goals: iSmart-LA is being stabilised toward a production release,
+incompatible goals: iPandu is being stabilised toward a production release,
 while this one needs to be experimented on. Those cannot share a repo without
 one of them losing.
 
 ## Merge rule: ONE DIRECTION
 
 ```
-iSmart-LA (production)  ──merge──▶  iPandu (experiment)
+iPandu (production)  ──merge──▶  iPandu (experiment)
                         ◀── NEVER ───
 ```
 
-Substrate fixes are made **once**, in iSmart-LA, and pulled in here:
+Substrate fixes are made **once**, in iPandu, and pulled in here:
 
 ```bash
 git fetch upstream
@@ -35,13 +35,13 @@ git merge upstream/master
 ```
 
 Nothing flows back automatically. If something proven here belongs in
-production, raise it as its own change in the iSmart-LA repo — never by merging
+production, raise it as its own change in the iPandu repo — never by merging
 backwards.
 
 The `upstream` remote is **push-disabled** on purpose:
 
 ```
-upstream  https://github.com/kokoali-bima/iSmart-LA.git  (fetch)
+upstream  https://github.com/kokoali-bima/iPandu.git  (fetch)
 upstream  DISABLED-push-to-production-forbidden          (push)
 ```
 
@@ -67,13 +67,13 @@ In practice:
 - New capabilities (email, WhatsApp, calendar) go in **new files**, wired in
   through the existing marker protocol rather than by opening up old functions.
 - Need to change `lite_agent.py`? First ask whether the change actually belongs
-  to iSmart-LA. If it does, make it there and pull it in.
+  to iPandu. If it does, make it there and pull it in.
 - If it genuinely belongs here, keep it small and in one place rather than
   spread across the file.
 
 ## Versioning
 
-iPandu has its own version line, starting at `v0.1.0`. iSmart-LA's tags were
+iPandu has its own version line, starting at `v0.1.0`. iPandu's tags were
 deliberately **not** carried over, so `current_version()` — which reads
 `git describe --tags` — can never report a production version on the assistant's
 machine. No code change was needed for that. The 114 commits of history are
@@ -98,7 +98,7 @@ and above all no `NEEDS_WRITE:` may originate from the body of an email.
 ## Language
 
 Repository documentation, code comments and commit messages are in **English**,
-the same as iSmart-LA. What the bot says **in Telegram stays bilingual**
+the same as iPandu. What the bot says **in Telegram stays bilingual**
 (English and Indonesian) — that is a product behaviour, not a repo convention,
 and it does not change here.
 
@@ -142,7 +142,7 @@ python3 dev/run_all.py lite_agent.py    # must still be green
 ## Two more things the merges taught
 
 **`git fetch upstream` brings upstream's tags.** The second merge pulled in 83
-of iSmart-LA's tags, which quietly undid the whole reason they were dropped at
+of iPandu's tags, which quietly undid the whole reason they were dropped at
 fork time: `current_version()` reads `git describe --tags`, so the assistant
 would have started reporting a production version on its own machine. The
 release gate caught it; nobody would have caught it by eye.

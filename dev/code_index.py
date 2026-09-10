@@ -38,7 +38,7 @@ import sys
 from pathlib import Path
 
 OUT_DIR = Path(os.environ.get(
-    "ISLA_INDEX_DIR", r"C:\laragon\www\infrasoft\lab\home-ai\ismart-la"))
+    "ISLA_INDEX_DIR", r"C:\laragon\www\infrasoft\lab\home-ai\ipandu"))
 
 
 def _sig(node) -> str:

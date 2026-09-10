@@ -1,5 +1,5 @@
 [Unit]
-Description=iSmart-LA (Lite Agent) - lightweight Telegram bridge to Claude Code + Antigravity CLI
+Description=iPandu (Lite Agent) - lightweight Telegram bridge to Claude Code + Antigravity CLI
 After=network.target
 
 [Service]

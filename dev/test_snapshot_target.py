@@ -126,7 +126,7 @@ ok, detail, cmds, hosts_tried, reg = run_snapshot("105", TARGET)
 check("a good snapshot succeeds", ok)
 check("...on the first host, because the right node was known",
       hosts_tried == ["10.10.95.2"])
-check("...with qm, and the id as a bare number", cmds[0].startswith("qm snapshot 105 ismart-"))
+check("...with qm, and the id as a bare number", cmds[0].startswith("qm snapshot 105 ipandu-"))
 check("...carrying a description that names the reason",
       "resize RAM" in cmds[0] and "--description" in cmds[0])
 check("...and it is registered so /snapshots can list it later", reg.called)

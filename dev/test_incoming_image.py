@@ -2,7 +2,7 @@
 """Tests that a photo sent to the bot is actually answered.
 
 Reported from a real session: a screenshot of a Google Cloud console page with
-the caption "Untuk buat connectgdrive di ismart, kita pilih yang mana nih?"
+the caption "Untuk buat connectgdrive di ipandu, kita pilih yang mana nih?"
 got **no reply at all**. Nothing in the log either -- the message never reached
 a handler. The message filter was `filters.TEXT & ~filters.COMMAND`, and a
 photo with a caption is not filters.TEXT, so it matched nothing and was

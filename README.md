@@ -1,6 +1,6 @@
 <div align="center">
 
-# iSmart-LA
+# iPandu
 ### Lite Agent -- a Telegram bridge to Claude Code & Antigravity CLI
 
 **Infrastructure monitoring and investigation, at a fraction of a full agent
@@ -10,7 +10,7 @@ framework's token cost.**
 [![License](https://img.shields.io/badge/license-proprietary-lightgrey)](#credits)
 [![Python](https://img.shields.io/badge/python-3.10--3.13-blue)](#system-requirements)
 [![Architecture](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-success)](#system-requirements)
-[![Tests](https://github.com/kokoali-bima/iSmart-LA/actions/workflows/tests.yml/badge.svg)](https://github.com/kokoali-bima/iSmart-LA/actions/workflows/tests.yml)
+[![Tests](https://github.com/kokoali-bima/iPandu/actions/workflows/tests.yml/badge.svg)](https://github.com/kokoali-bima/iPandu/actions/workflows/tests.yml)
 
 🚀 [Quick Start](#quickstart) •
 💡 [Features](#features) •
@@ -44,7 +44,7 @@ for token spend to run away silently. In this project's own testing, one such
 background-review feature burned **~900,000 tokens in a single incident** retrying a
 broken tool call in a loop nobody was watching.
 
-iSmart-LA takes the opposite approach: instead of building more agent scaffolding, it
+iPandu takes the opposite approach: instead of building more agent scaffolding, it
 shells out to two CLIs that Anthropic and Google already built and already do the hard
 part well (tool execution, reasoning, safety self-gating via a system prompt), and adds
 the smallest possible layer on top -- a Telegram relay, per-chat session bookkeeping,
@@ -53,7 +53,7 @@ to re-run, review, or "improve" a past turn.
 
 ## Features
 
-| | A full agent framework (tried first, on this same infrastructure) | iSmart-LA |
+| | A full agent framework (tried first, on this same infrastructure) | iPandu |
 |---|---|---|
 | Runaway background loop | ❌ A retrying background-review feature burned **~900,000 tokens** in one incident, unwatched | ✅ Nothing runs unless a human asked, right now -- there is no loop to retry |
 | Same 7-node benchmark task | ❌ **3.5x** the cost, on ordinary turns with nothing going wrong | ✅ Baseline -- four fixed-price tiers, cheapest first |
@@ -150,7 +150,7 @@ down, this is the map.
 Tried that route first, on the same infrastructure this bot now manages, before
 building this (the ~900,000-token incident above is from that attempt) -- and beyond
 that one incident, the same 7-node benchmark task cost **3.5x more** there than it
-costs here, on ordinary turns with nothing going wrong. iSmart-LA's answer isn't a
+costs here, on ordinary turns with nothing going wrong. iPandu's answer isn't a
 smarter loop -- it's **no loop**: every token spent is because a human asked for
 something, right now, enforced by what's absent from this codebase, not by a setting
 that could drift back on.
@@ -713,7 +713,7 @@ Either way, once a token is in hand the bot:
   label like `company` or `clienta` for a second+ one -- becomes `gdrive_company`)
 - registers it with `rclone config create`, never by hand-editing `rclone.conf`
 - checks whether this account already has this deployment's own
-  `iSmart-LA/<bot name>` root folder before creating one, so re-authorizing the
+  `iPandu/<bot name>` root folder before creating one, so re-authorizing the
   same account by mistake (a typo'd label, say) can't silently produce a second
   folder with nothing to notice until files start landing in the wrong one
 - **verifies** with a real listing before calling it connected -- reported success
@@ -748,7 +748,7 @@ replies with a shareable link. Same secret-scan gate as sending a file through
 Telegram — a file containing a credential is refused, not uploaded.
 
 **In a group, uploads land inside that group's own subfolder automatically** —
-`iSmart-LA/<bot name>/<group name>/...` — without the model needing to know or
+`iPandu/<bot name>/<group name>/...` — without the model needing to know or
 add the group's name itself. Asking for the shared root instead (a path starting with `/`)
 only works for that group's own admin (or the owner); anyone else's attempt is
 quietly kept inside the group's folder rather than refused outright, the same way
@@ -816,8 +816,8 @@ authorize` uses, so `/connectgdrive setupclient desktop` stores a second client
 in the same Google Cloud project, and the manual instructions attach it
 automatically once it exists.
 
-**Each deployment gets its own root, `iSmart-LA/<bot name>`, not one shared
-`iSmart-LA Data`.** Two bots on one host sharing a connected Google account —
+**Each deployment gets its own root, `iPandu/<bot name>`, not one shared
+`iPandu Data`.** Two bots on one host sharing a connected Google account —
 a real setup once `SERVICE_NAME` makes multiple deployments easy — used to
 write into the *same* root, told apart only by each room's own subfolder,
 which collides outright the moment both bots ever serve a room with the same

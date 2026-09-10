@@ -33,7 +33,7 @@ except Exception as exc:            # pragma: no cover - import-time only
     sys.exit(2)
 
 OUT_DIR = Path(os.environ.get(
-    "ISLA_INDEX_DIR", r"C:\laragon\www\infrasoft\lab\home-ai\ismart-la"))
+    "ISLA_INDEX_DIR", r"C:\laragon\www\infrasoft\lab\home-ai\ipandu"))
 DUPLICATE_EXIT = 3          # same convention as code_index.py
 MISSING_GUARD_EXIT = 3
 
@@ -47,7 +47,7 @@ def out_dir() -> tuple[Path, str]:
 def render(errors, missing) -> str:
     by_area = Counter(e["area"] for e in errors)
     lines = [
-        "# Error history — iSmart-LA",
+        "# Error history — iPandu",
         "",
         f"Generated {_dt.datetime.now():%Y-%m-%d %H:%M} · {len(errors)} shipped "
         f"failures across {len(by_area)} areas",

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# iSmart-LA -- provision an ADDITIONAL deployment on this host
+# iPandu -- provision an ADDITIONAL deployment on this host
 #
 # One host can run several agents that answer as genuinely different things --
 # an infrastructure one holding SSH keys to production, a development one that
@@ -96,11 +96,11 @@ SERVICE_NAME="lite-agent-${NAME}"
 HOME_DIR="/home/${USER_NAME}"
 INSTALL_DIR="${HOME_DIR}/lite-agent"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
-SUDOERS_RUNTIME="/etc/sudoers.d/ismart-${NAME}"
-SUDOERS_INSTALL="/etc/sudoers.d/ismart-${NAME}-install"
+SUDOERS_RUNTIME="/etc/sudoers.d/ipandu-${NAME}"
+SUDOERS_INSTALL="/etc/sudoers.d/ipandu-${NAME}-install"
 
 echo ""
-echo "${BOLD}iSmart-LA -- new deployment${RESET}"
+echo "${BOLD}iPandu -- new deployment${RESET}"
 echo "  name:      ${NAME}"
 echo "  user:      ${USER_NAME}"
 echo "  directory: ${INSTALL_DIR}"
@@ -206,7 +206,7 @@ fi
 # install.sh, as root.
 say "Granting sudo rights"
 cat > "$SUDOERS_RUNTIME" <<EOF
-# iSmart-LA ${NAME}: /update restarts its own service and nothing else.
+# iPandu ${NAME}: /update restarts its own service and nothing else.
 # Deliberately NOT granting writes to ${UNIT_PATH} -- that would let this
 # user rewrite its own unit as root. See newagent.sh.
 #

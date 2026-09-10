@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # ------------------------------------------------------------------------------
-# iSmart-LA -- Copyright (c) 2026 Infrasoft.cloud & BSCloud.id Team.
+# iPandu -- Copyright (c) 2026 Infrasoft.cloud & BSCloud.id Team.
 # See LICENSE. Any deployment or redistribution of this software must retain
 # the "Designed by Koko Ali & Dede - Developed by Infrasoft.cloud & BSCloud.id
 # Team" credit as it appears in /start and /help below -- do not remove it.
 # ------------------------------------------------------------------------------
 """
-iSmart-LA (Lite Agent) -- a lightweight Telegram bridge to Claude Code and
+iPandu (Lite Agent) -- a lightweight Telegram bridge to Claude Code and
 Antigravity CLI. Both CLIs sign in to their own fixed-price subscriptions
 directly (no gateway required); see README "Using a gateway instead" for the
 optional path if one is ever needed.
@@ -331,11 +331,11 @@ RCLONE_BIN = os.environ.get("RCLONE_BIN", "rclone")
 # outright if both bots ever serve a room with the same name.
 GDRIVE_ROOT = os.environ.get(
     "GDRIVE_ROOT",
-    f"iSmart-LA/{os.environ.get('SERVICE_NAME', 'lite-agent')}")
+    f"iPandu/{os.environ.get('SERVICE_NAME', 'lite-agent')}")
 # The old, flat, shared-by-every-deployment name. Kept ONLY so an account
 # that already has it can be migrated automatically -- never written to
 # again once _migrate_gdrive_root() has moved it.
-GDRIVE_LEGACY_ROOT = "iSmart-LA Data"
+GDRIVE_LEGACY_ROOT = "iPandu Data"
 
 # Bound rclone's OWN retrying. Left at its defaults (--retries 3 with
 # exponential backoff, --low-level-retries 10) a single transient 5xx from
@@ -1020,8 +1020,8 @@ def _new_pin_session(action: str, payload: dict, chat_id: int) -> str:
 
 SCHEDULES_FILE = BASE_DIR / "schedules.json"
 MODEL_OVERRIDE_FILE = BASE_DIR / "model_overrides.json"  # {chat_id: model}
-CRON_BEGIN = "# BEGIN iSmart-LA managed -- edited by the bot, do not hand-edit"
-CRON_END = "# END iSmart-LA managed"
+CRON_BEGIN = "# BEGIN iPandu managed -- edited by the bot, do not hand-edit"
+CRON_END = "# END iPandu managed"
 # SCHEDULE: name=daily-report | when=0 8 * * * | run=python3 x.py | write=no
 SCHEDULE_LINE_RE = re.compile(r"^\s*SCHEDULE:\s*(.+?)\s*$", re.MULTILINE)
 _CRON_FIELD_RE = re.compile(r"^[\d*/,\-]+$")
@@ -1109,7 +1109,7 @@ def _rebuild_crontab(items: list[dict], strip_lines: set[str] | None = None) -> 
     for it in items:
         lines.append(
             f"{it['when']} {RUN_SCHEDULED} {it['name']} "
-            f">> {BASE_DIR / 'scheduled.log'} 2>&1  # ismart:{it['name']}"
+            f">> {BASE_DIR / 'scheduled.log'} 2>&1  # ipandu:{it['name']}"
         )
     lines.append(CRON_END)
     body = "\n".join(x for x in (head, "\n".join(lines), tail) if x).rstrip("\n") + "\n"
@@ -1412,8 +1412,8 @@ def extract_gdrive(text: str) -> tuple[str, list[dict]]:
 
 SERVERS_FILE = BASE_DIR / "servers.json"
 SSH_CONFIG_FILE = Path.home() / ".ssh" / "config"
-SSH_CONFIG_BEGIN = "# BEGIN iSmart-LA managed -- edited by the bot, do not hand-edit"
-SSH_CONFIG_END = "# END iSmart-LA managed"
+SSH_CONFIG_BEGIN = "# BEGIN iPandu managed -- edited by the bot, do not hand-edit"
+SSH_CONFIG_END = "# END iPandu managed"
 SERVER_WIZARD_TTL = 900
 _server_wizard: dict[int, dict] = {}
 SERVER_WIZARD_FILE = BASE_DIR / "server_wizard.json"
@@ -1766,11 +1766,11 @@ def agent_keypair() -> tuple[Path, Path]:
     """
     if SSH_RO_KEY.exists():
         return SSH_RO_KEY, SSH_RO_KEY.with_suffix(".pub")
-    key = Path.home() / ".ssh" / "ismart_agent"
+    key = Path.home() / ".ssh" / "ipandu_agent"
     if not key.exists():
         key.parent.mkdir(mode=0o700, exist_ok=True)
         subprocess.run(
-            ["ssh-keygen", "-t", "ed25519", "-f", str(key), "-N", "", "-C", "ismart-la-agent"],
+            ["ssh-keygen", "-t", "ed25519", "-f", str(key), "-N", "", "-C", "ipandu-agent"],
             capture_output=True, text=True, check=True,
         )
         logger.warning("generated a new agent SSH keypair at %s", key)
@@ -1815,7 +1815,7 @@ def test_server_ssh(host: str, user: str, port: int, timeout: int = 20,
                     key_path: Optional[str] = None) -> tuple[bool, str]:
     key = Path(key_path) if key_path else agent_keypair()[0]
     # A BARE command, with no shell operators. The probe used to be
-    # `echo ISMART_OK && uname -sr`, and our OWN read-only guard refused it:
+    # `echo IPANDU_OK && uname -sr`, and our OWN read-only guard refused it:
     # pve-ro-guard denies any `&`, `;`, backtick or redirect outright, before
     # it ever looks at the verbs. So every /addserver against an
     # already-secured Proxmox failed with "refused -- this key is read-only",
@@ -1823,7 +1823,7 @@ def test_server_ssh(host: str, user: str, port: int, timeout: int = 20,
     # The only server that ever registered got in before the guard existed.
     #
     # `uname -sr` needs no sentinel: it either answers "Linux <release>" or it
-    # did not run. That is the same evidence ISMART_OK was carrying, without
+    # did not run. That is the same evidence IPANDU_OK was carrying, without
     # asking the guard to parse a compound command.
     proc = subprocess.run(
         ["ssh", "-i", str(key), "-p", str(port),
@@ -2060,9 +2060,9 @@ def extract_needs_write(text: str) -> tuple[str, Optional[str]]:
 
 NODE_GUARD_SCRIPT = BASE_DIR / "node-guard" / "pve-ro-guard"
 NODE_GUARD_REMOTE = "/usr/local/bin/pve-ro-guard"
-RO_KEY_COMMENT = "ismart-la-readonly"
-RW_KEY_COMMENT = "ismart-la-write"
-LEGACY_KEY_COMMENT = "ismart-la-agent"
+RO_KEY_COMMENT = "ipandu-readonly"
+RW_KEY_COMMENT = "ipandu-write"
+LEGACY_KEY_COMMENT = "ipandu-agent"
 _GUARD_KEY_OPTS = (
     'command="' + NODE_GUARD_REMOTE + '",no-port-forwarding,'
     'no-agent-forwarding,no-X11-forwarding,no-pty'
@@ -2115,13 +2115,13 @@ def _admin_key_for(host: str, user: str, port: int) -> Optional[Path]:
     an existing, unprotected host automatic instead of a manual re-setup --
     the whole point of this being permanent rather than a one-off tweak.
     """
-    legacy = Path.home() / ".ssh" / "ismart_agent"
+    legacy = Path.home() / ".ssh" / "ipandu_agent"
     for key in (SSH_RW_KEY, legacy):
         if not key.exists():
             continue
         try:
-            if _ssh_as(key, host, user, port, "echo ISMART_ADMIN_OK", timeout=25).stdout.count(
-                    "ISMART_ADMIN_OK"):
+            if _ssh_as(key, host, user, port, "echo IPANDU_ADMIN_OK", timeout=25).stdout.count(
+                    "IPANDU_ADMIN_OK"):
                 return key
         except Exception:
             continue
@@ -2164,15 +2164,15 @@ def install_node_guard(host: str, user: str, port: int) -> tuple[bool, str]:
         "touch ~/.ssh/authorized_keys",
         # Quoted heredoc: nothing inside the guard is expanded by the remote
         # shell, and it only moves into place once it has landed complete.
-        "cat > /tmp/.pve-ro-guard.new <<'ISMART_GUARD_EOF'",
+        "cat > /tmp/.pve-ro-guard.new <<'IPANDU_GUARD_EOF'",
         guard_src,
-        "ISMART_GUARD_EOF",
+        "IPANDU_GUARD_EOF",
         f"install -m 755 /tmp/.pve-ro-guard.new {NODE_GUARD_REMOTE}",
         "rm -f /tmp/.pve-ro-guard.new",
-        # Keep the pre-iSmart file once, and only once: re-running must not
+        # Keep the pre-iPandu file once, and only once: re-running must not
         # overwrite the backup with a copy of our own work.
-        "[ -e ~/.ssh/authorized_keys.ismart-bak ] || "
-        "cp ~/.ssh/authorized_keys ~/.ssh/authorized_keys.ismart-bak",
+        "[ -e ~/.ssh/authorized_keys.ipandu-bak ] || "
+        "cp ~/.ssh/authorized_keys ~/.ssh/authorized_keys.ipandu-bak",
         # This used to ask only whether the key was PRESENT, and skip when it
         # was. On any host where the operator had already pasted
         # agent_readonly.pub by hand, that skipped silently -- leaving a line
@@ -2188,28 +2188,28 @@ def install_node_guard(host: str, user: str, port: int) -> tuple[bool, str]:
         # unconditionally is still idempotent in content -- a second run lands
         # the same file -- and it heals a hand-pasted key instead of trusting it.
         "grep -vF '" + fingerprint_bit + "' ~/.ssh/authorized_keys "
-        "> /tmp/.ismart_ak.new || true",
-        f"printf '%s\\n' '{ro_line}' >> /tmp/.ismart_ak.new",
+        "> /tmp/.ipandu_ak.new || true",
+        f"printf '%s\\n' '{ro_line}' >> /tmp/.ipandu_ak.new",
         # Never install an empty authorized_keys. It cannot be empty here (the
         # line above just appended), but this is the file that decides whether
         # anyone can still log in, so the guarantee is stated rather than
         # inferred -- `set -e` aborts before the overwrite if it ever fails.
-        "test -s /tmp/.ismart_ak.new",
+        "test -s /tmp/.ipandu_ak.new",
         # cat, not mv: preserves the file's existing owner and mode.
-        "cat /tmp/.ismart_ak.new > ~/.ssh/authorized_keys",
-        "rm -f /tmp/.ismart_ak.new",
+        "cat /tmp/.ipandu_ak.new > ~/.ssh/authorized_keys",
+        "rm -f /tmp/.ipandu_ak.new",
         # Bootstrapping off the legacy key? Authorise the write key too, so the
         # next run has a proper admin key and the legacy one can be retired.
         (f"grep -qF '{rw_pub.split()[1][:40]}' ~/.ssh/authorized_keys || "
          f"printf '%s\\n' '{rw_pub}' >> ~/.ssh/authorized_keys") if rw_pub else "true",
         "chmod 600 ~/.ssh/authorized_keys",
-        "echo ISMART_GUARD_INSTALLED",
+        "echo IPANDU_GUARD_INSTALLED",
     ])
     try:
         proc = _ssh_as(admin_key, host, user, port, script, timeout=60)
     except Exception as exc:
         return False, str(exc)
-    if "ISMART_GUARD_INSTALLED" in proc.stdout:
+    if "IPANDU_GUARD_INSTALLED" in proc.stdout:
         return True, "guard installed"
     return False, (proc.stderr or proc.stdout or "no response").strip()[-400:]
 
@@ -2228,7 +2228,7 @@ def verify_node_guard(host: str, user: str, port: int) -> tuple[bool, str]:
         if read.returncode != 0:
             detail = (read.stderr or read.stdout or "no response").strip()[-200:]
             return False, "read-only key cannot even read: " + detail
-        probe = "/tmp/.ismart_guard_probe"
+        probe = "/tmp/.ipandu_guard_probe"
         write = _ssh_as(
             SSH_RO_KEY, host, user, port,
             f"touch {probe} && rm -f {probe} && echo WRITE_WENT_THROUGH")
@@ -2404,7 +2404,7 @@ def harden_ssh_advice(lang: str) -> str:
         "\n\n🔐 <b>This host still accepts password logins.</b>\n"
         "Now that my key works, you can close that off. Run on the host:\n"
         "<pre>printf 'PasswordAuthentication no\\nKbdInteractiveAuthentication no\\n' \\\n"
-        "  > /etc/ssh/sshd_config.d/00-ismart-hardening.conf\n"
+        "  > /etc/ssh/sshd_config.d/00-ipandu-hardening.conf\n"
         "sshd -t &amp;&amp; systemctl reload ssh || systemctl reload sshd\n"
         "sshd -T | grep -i passwordauth</pre>\n"
         "<i>Keep this SSH session open until that last line prints "
@@ -2416,7 +2416,7 @@ def harden_ssh_advice(lang: str) -> str:
         "\n\n🔐 <b>Host ini masih menerima login password.</b>\n"
         "Sekarang kunci saya sudah jalan, itu bisa ditutup. Jalankan di host:\n"
         "<pre>printf 'PasswordAuthentication no\\nKbdInteractiveAuthentication no\\n' \\\n"
-        "  > /etc/ssh/sshd_config.d/00-ismart-hardening.conf\n"
+        "  > /etc/ssh/sshd_config.d/00-ipandu-hardening.conf\n"
         "sshd -t &amp;&amp; systemctl reload ssh || systemctl reload sshd\n"
         "sshd -T | grep -i passwordauth</pre>\n"
         "<i>Biarkan sesi SSH ini tetap terbuka sampai baris terakhir mencetak "
@@ -2560,8 +2560,8 @@ def take_snapshot(vmid: str, target: Optional[dict], reason: str) -> tuple[bool,
     # A container is not a VM: `qm` refuses one in wording that reads like the
     # guest is missing entirely.
     tool = "pct" if target.get("type") == "lxc" else "qm"
-    name = f"ismart-{_dt.datetime.now():%m%d-%H%M}"
-    desc = f"iSmart-LA before: {reason[:120]}"
+    name = f"ipandu-{_dt.datetime.now():%m%d-%H%M}"
+    desc = f"iPandu before: {reason[:120]}"
     hosts = _snapshot_hosts(target.get("host"))
     if not hosts:
         return False, ("no Proxmox host is registered here -- /addserver the "
@@ -3335,7 +3335,7 @@ def _wizard_keyboard(state: dict, lang: str = "id") -> InlineKeyboardMarkup:
 
 
 def _wizard_text(lang: str = "id") -> str:
-    lines = [_t(lang, "\U0001f6e0 <b>iSmart-LA setup</b>", "\U0001f6e0 <b>Setup iSmart-LA</b>"), ""]
+    lines = [_t(lang, "\U0001f6e0 <b>iPandu setup</b>", "\U0001f6e0 <b>Setup iPandu</b>"), ""]
     for label, done, hint in setup_summary():
         lines.append(f"{'✅' if done else '⬜'} <b>{label}</b>\n   <i>{hint}</i>")
     if all(done for _, done, _ in setup_summary()):
@@ -6504,7 +6504,7 @@ async def _begin_cli_login(update: Update, query, provider: str) -> None:
     else:
         cmd, human = [CLAUDE_BIN, "auth", "login"], "Claude Code"
 
-    handle = LoginHandle(session=f"ismart-login-{provider}", command=cmd)
+    handle = LoginHandle(session=f"ipandu-login-{provider}", command=cmd)
     await _safe_edit(query, _t(lang, f"⏳ Starting {human} sign-in…", f"⏳ Memulai sign-in {human}…"))
     try:
         handle.start()
@@ -6777,7 +6777,7 @@ async def _gdrive_device_wait(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
             # Google sends access_denied for a refusal AND for an app still in
             # "Testing" publishing status, where it blocks every account that
             # is not on the test-user list -- including the developer's own.
-            # Reported live: "Akses diblokir: ismart belum menyelesaikan proses
+            # Reported live: "Akses diblokir: ipandu belum menyelesaikan proses
             # verifikasi Google / Error 403: access_denied", from an operator
             # who had not declined anything. Saying only "you declined" would
             # send them looking in exactly the wrong place.
@@ -7784,7 +7784,7 @@ _HELP_CREDITS = (
     "Happy smart working! ✨\U0001f929\U0001f60e"
 )
 
-HELP_TEXT_EN = f"""\U0001f4d6 *iSmart-LA — Usage Guide*
+HELP_TEXT_EN = f"""\U0001f4d6 *iPandu — Usage Guide*
 
 *How it works*
 Every message is tried through 4 tiers, cheapest first:
@@ -7859,7 +7859,7 @@ If this group has been registered by an admin (check with `/chatid`), EVERY memb
 
 {_HELP_CREDITS}"""
 
-HELP_TEXT_ID = f"""\U0001f4d6 *iSmart-LA — Panduan Pemakaian*
+HELP_TEXT_ID = f"""\U0001f4d6 *iPandu — Panduan Pemakaian*
 
 *Cara kerjanya*
 Setiap pesan dicoba lewat 4 tingkatan, dari yang paling murah dulu:
@@ -10185,7 +10185,7 @@ def connect_gdrive_account(name: str, token_raw: str,
     # token turns out to be the SAME underlying Google account as one already
     # connected (a re-authorize by mistake, or a typo'd label), the shared
     # root folder already exists -- creating it again would silently split
-    # future uploads across two "iSmart-LA Data" folders with nothing to
+    # future uploads across two "iPandu Data" folders with nothing to
     # notice until files start landing in the wrong one.
     try:
         migrated, root_exists = _migrate_gdrive_root(name)

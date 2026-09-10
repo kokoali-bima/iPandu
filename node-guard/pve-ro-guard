@@ -1,12 +1,12 @@
 #!/bin/bash
 # ==============================================================================
-# pve-ro-guard -- read-only gate for the iSmart-LA agent's restricted SSH key
+# pve-ro-guard -- read-only gate for the iPandu agent's restricted SSH key
 #
 # Install on each managed node as /usr/local/bin/pve-ro-guard (chmod 755), then
 # add the agent's READ-ONLY public key to /root/.ssh/authorized_keys with:
 #
 #   command="/usr/local/bin/pve-ro-guard",no-port-forwarding,no-agent-forwarding,
-#   no-X11-forwarding,no-pty ssh-ed25519 AAAA...  ismart-la-readonly
+#   no-X11-forwarding,no-pty ssh-ed25519 AAAA...  ipandu-readonly
 #
 # The agent's WRITE key goes in as a normal unrestricted entry. Which of the two
 # the agent presents is decided on the bot side by /unlock, so this script never

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-iSmart-LA bootstrap -- generate this deployment's environment brief.
+iPandu bootstrap -- generate this deployment's environment brief.
 
 Run once after install (install.sh calls it), or again any time you want to
 redo the brief from scratch.

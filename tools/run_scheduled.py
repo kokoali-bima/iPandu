@@ -65,7 +65,7 @@ def main() -> int:
         if not SSH_WRITE_KEY.exists():
             log(f"task '{name}' needs write access but {SSH_WRITE_KEY} is missing -- refusing")
             return 1
-        shim_dir = tempfile.mkdtemp(prefix="ismart-sched-")
+        shim_dir = tempfile.mkdtemp(prefix="ipandu-sched-")
         shim = Path(shim_dir) / "ssh"
         shim.write_text(
             "#!/bin/sh\n"

@@ -31,13 +31,13 @@ detection themselves.
 ## v0.2b.98 -- one Drive root per deployment, and accounts shown by name
 
 Found while reviewing the just-merged multi-deployment work: `GDRIVE_ROOT` was
-a single fixed name, `iSmart-LA Data`, the same for every install. Two bots on
+a single fixed name, `iPandu Data`, the same for every install. Two bots on
 one host sharing one connected Google account -- a real setup now that
 `SERVICE_NAME` makes that easy -- would silently write into the SAME root,
 distinguished only by each room's own subfolder, which collides outright the
 moment both bots ever serve a room with the same name.
 
-The root is now `iSmart-LA/<SERVICE_NAME>`, keyed by the same identity the
+The root is now `iPandu/<SERVICE_NAME>`, keyed by the same identity the
 multi-deployment work already uses to keep everything else (brief, sessions,
 PIN, servers) apart. An account that already holds the old flat folder is
 migrated automatically, once, the next time the bot starts: the whole tree --
@@ -482,7 +482,7 @@ box. The same round-trip this entry is about started exactly there.
 That host's `authorized_keys` held the agent's read-only key, pasted there by
 hand while the machine was being prepared:
 
-    ssh-ed25519 AAAA...KPw7j68... ismart-la-readonly
+    ssh-ed25519 AAAA...KPw7j68... ipandu-readonly
 
 No `command=`. `install_node_guard()` asked only whether the key was PRESENT,
 found it, and skipped adding the guarded line -- then reported success. The
@@ -501,8 +501,8 @@ guarded one written in its place. `grep -vF`, not `sed`: base64 can contain
 `/`, and no sed delimiter is safe for every possible key blob. Rewriting
 unconditionally is still idempotent in content -- a second run lands the same
 file, which is what makes `/secure` safe to re-run -- and it heals a
-hand-pasted key rather than trusting it. The pre-iSmart file is copied to
-`authorized_keys.ismart-bak` once and never overwritten afterwards, and
+hand-pasted key rather than trusting it. The pre-iPandu file is copied to
+`authorized_keys.ipandu-bak` once and never overwritten afterwards, and
 `test -s` refuses to install an empty authorized_keys before the overwrite,
 because this is the file that decides whether anyone can still log in.
 
@@ -1450,7 +1450,7 @@ half the time.
 The advice is a **drop-in**, not the `sed -i` recipe that circulates for this:
 
     printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' \
-      > /etc/ssh/sshd_config.d/00-ismart-hardening.conf
+      > /etc/ssh/sshd_config.d/00-ipandu-hardening.conf
     sshd -t && systemctl reload ssh || systemctl reload sshd
     sshd -T | grep -i passwordauth
 
@@ -1719,7 +1719,7 @@ A night of real failures, all reported by the operator, all reproduced.
 **`/addserver` could not add anything, and it was our own guard doing it.**
 The Kota Bima Proxmox refused every attempt with `pve-ro-guard: refused -- this
 key is read-only`, though the key was installed correctly. The probe was
-`echo ISMART_OK && uname -sr`, and pve-ro-guard denies any `&`, `;`, backtick
+`echo IPANDU_OK && uname -sr`, and pve-ro-guard denies any `&`, `;`, backtick
 or redirect outright, before it looks at which verbs were used. So the sentinel
 that existed to prove the command ran was the exact reason it could not run.
 Reproduced on both hosts; the one server that ever registered got in before the
@@ -2345,7 +2345,7 @@ Full suite: **570/570 across 29 suites** on the real Linux target.
 
 ## v0.2b.60 -- access_denied now names the cause that actually produces it
 
-An operator hit "Akses diblokir: ismart belum menyelesaikan proses verifikasi
+An operator hit "Akses diblokir: ipandu belum menyelesaikan proses verifikasi
 Google / Error 403: access_denied" while connecting Drive, having declined
 nothing.
 
@@ -3109,7 +3109,7 @@ be the risky, error-prone part after that moves into Telegram:
 - Registers via `rclone config create` -- verified live, with a harmless probe
   remote, not to disturb any existing account's config.
 - Checks whether the SAME underlying account already has the shared
-  `iSmart-LA Data` root folder before creating one -- the exact duplicate-folder
+  `iPandu Data` root folder before creating one -- the exact duplicate-folder
   risk the old manual README steps could only warn about, now actually
   prevented rather than just documented.
 - **Verifies with a real Drive listing before ever reporting success** -- the
@@ -4446,7 +4446,7 @@ sends a file to the wrong place unnoticed. `/gdrive` is now gated like `/usemode
 not a per-person one.
 
 **Uploads from a group land inside that group's own subfolder automatically** --
-`iSmart-LA Data/<group name>/...` -- without the agent needing to know or add the
+`iPandu Data/<group name>/...` -- without the agent needing to know or add the
 group's name itself. A path starting with `/` asks for the shared root instead, but
 that escape only actually works for the room's own admin (or the owner); anyone
 else's attempt is quietly kept inside the group's folder rather than refused
@@ -4459,7 +4459,7 @@ itself enforces, so the escape hatch is deliberately not open to everyone.
 README's setup instructions now check for an existing root folder before creating
 one -- connecting a second remote that turns out to be the *same* underlying Google
 account (a typo'd name, or re-authorizing the same account by mistake) would
-otherwise silently create a second "iSmart-LA Data" folder side by side with the
+otherwise silently create a second "iPandu Data" folder side by side with the
 first.
 
 **Also: `/help` fully synced across all four copies** (repo EN/ID, production
@@ -4469,7 +4469,7 @@ never applied to repo's own); production's English copy had the identical gap in
 the other direction, never fixed either way; and all four copies still described
 `/unlock` as "owner-only, DM-only", stale since v0.2b.2. Production's title also
 still read "Lite Agent" in both languages, pre-dating the rename -- fixed to
-"iSmart-LA" in both. (Command *replies* themselves -- `/usemodel`, `/gdrive`, `/mode`,
+"iPandu" in both. (Command *replies* themselves -- `/usemodel`, `/gdrive`, `/mode`,
 etc -- are still each deployment's fixed language, not switched at runtime; only
 `/help` offers an explicit EN/ID choice. Making every reply follow a per-chat
 language preference was considered and deliberately deferred -- a much larger
@@ -4500,7 +4500,7 @@ itself creates -- never the rest of that Drive. Same secret-scan gate already us
 for Telegram delivery applies here too: a file containing a credential is refused,
 not uploaded.
 
-One root folder ("iSmart-LA Data" by default) holds everything; per-request
+One root folder ("iPandu Data" by default) holds everything; per-request
 subfolders (e.g. one per client) are named in the message itself, not configured
 ahead of time -- `/usemodel`'s "ask for it by name" shape applied to a different
 problem.
@@ -4604,7 +4604,7 @@ unnoticed edit.
 
 **Fixed:** production's own module docstring was still the original pre-rename
 text ("Lite Agent... routed through 9Router") -- never resynced through the agy
-integration, the rename to iSmart-LA, or dropping 9Router entirely, even though
+integration, the rename to iPandu, or dropping 9Router entirely, even though
 every functional change had been kept in sync. Replaced with the current, accurate
 header; verified byte-for-byte parity between production and the repo afterward.
 

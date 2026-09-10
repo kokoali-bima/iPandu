@@ -139,7 +139,7 @@ ERRORS = [
         "symptom": "/addserver failed repeatedly for the Kota Bima Proxmox with "
                    "\"pve-ro-guard: refused -- this key is read-only\", although "
                    "the SSH key was installed correctly.",
-        "cause": "The probe was `echo ISMART_OK && uname -sr`, and our own "
+        "cause": "The probe was `echo IPANDU_OK && uname -sr`, and our own "
                  "read-only guard denies any `&` before it looks at the verbs. "
                  "Reproduced on both hosts. The one server that ever registered "
                  "got in before the guard was installed.",

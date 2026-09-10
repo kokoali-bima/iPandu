@@ -1,6 +1,6 @@
 # Security Policy
 
-iSmart-LA holds real credentials for real infrastructure — a Telegram bot
+iPandu holds real credentials for real infrastructure — a Telegram bot
 token, SSH keys with write access to managed hosts, a PIN's salt and hash, and
 whatever a chat's own conversations and briefs contain. Report anything found
 wrong here the same way you would for a production host, not a typical

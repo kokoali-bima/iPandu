@@ -10,7 +10,7 @@ The key was fine. Verified live on that host: `hostname`, `uname -a` and
 `cat` all answered normally with the read-only key, and only the probe was
 refused. The probe was:
 
-    echo ISMART_OK && uname -sr
+    echo IPANDU_OK && uname -sr
 
 and pve-ro-guard denies any `&`, `;`, backtick, redirect or newline outright,
 before it ever looks at which verbs were used. So the sentinel that existed to
@@ -79,7 +79,7 @@ present = [c for c in BANNED if c in remote_cmd]
 check(f"the probe carries no shell operator the guard rejects "
       f"(command: {remote_cmd!r})", not present)
 check("...specifically not the `&&` that caused this", "&&" not in remote_cmd)
-check("...and no ISMART_OK sentinel that needs one", "ISMART_OK" not in remote_cmd)
+check("...and no IPANDU_OK sentinel that needs one", "IPANDU_OK" not in remote_cmd)
 check("the probe still identifies the machine", "uname" in remote_cmd)
 
 check("a normal answer registers the server", ok and "Linux" in detail)

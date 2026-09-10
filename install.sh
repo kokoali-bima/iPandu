@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# iSmart-LA (Lite Agent) installer
+# iPandu (Lite Agent) installer
 #
 # Interactive setup for a fresh deployment. Designed to be run directly on a
 # Debian/Ubuntu VM with a real terminal (SSH is fine, as long as you have a
@@ -46,7 +46,7 @@ INSTALL_USER="$(whoami)"
 SERVICE_NAME="${SERVICE_NAME:-lite-agent}"
 
 echo ""
-echo "${BOLD}iSmart-LA installer${RESET}  ${DIM}(lightweight Telegram bridge to Claude Code + Antigravity CLI)${RESET}"
+echo "${BOLD}iPandu installer${RESET}  ${DIM}(lightweight Telegram bridge to Claude Code + Antigravity CLI)${RESET}"
 echo "Install dir: ${INSTALL_DIR}"
 echo "Running as:  ${INSTALL_USER}"
 echo "Service:     ${SERVICE_NAME}"

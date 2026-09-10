@@ -27,7 +27,7 @@ import sys
 import time
 from pathlib import Path
 
-SESSION = "ismart-agy-login"
+SESSION = "ipandu-agy-login"
 URL_RE = re.compile(r"https://\S*(?:google|antigravity)\S*", re.I)
 # Words agy prints once a session exists.
 SUCCESS_HINTS = ("logged in", "signed in", "authenticated", "welcome", "ready")

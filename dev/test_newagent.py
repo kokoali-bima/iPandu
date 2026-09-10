@@ -163,7 +163,7 @@ check("...and an invalid one is removed rather than left in /etc/sudoers.d",
 # --- 4. the broad install-time grant cannot outlive the install ------------
 check("the temporary install rule is a separate file from the runtime one",
       "SUDOERS_INSTALL=" in text and "SUDOERS_RUNTIME=" in text
-      and "ismart-${NAME}-install" in text)
+      and "ipandu-${NAME}-install" in text)
 check("a trap removes it on EXIT, INT and TERM -- Ctrl-C and a failed install "
       "included, which is the only reason granting it is defensible",
       re.search(r"trap cleanup EXIT INT TERM", text) is not None)

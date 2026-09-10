@@ -166,24 +166,24 @@ check("a host the read-only key cannot even read is not called protected",
 
 # --- 3. the legacy-key migration path -------------------------------------
 if HAVE_KEYGEN:
-    legacy = Path(HOME) / ".ssh" / "ismart_agent"
+    legacy = Path(HOME) / ".ssh" / "ipandu_agent"
     # The bot creates ~/.ssh itself on a real host; here the scratch home
     # is empty, so the migration fixture has to make the directory it is
     # pretending already existed.
     legacy.parent.mkdir(parents=True, exist_ok=True)
     legacy.write_text("x", encoding="utf-8")
     def only_legacy_works(key, host, user, port, cmd, timeout=30):
-        if Path(key).name == "ismart_agent":
-            return proc(stdout="ISMART_ADMIN_OK\n")
+        if Path(key).name == "ipandu_agent":
+            return proc(stdout="IPANDU_ADMIN_OK\n")
         return proc(stderr="Permission denied", rc=255)
     with patch.object(mod, "_ssh_as", side_effect=only_legacy_works):
         chosen = mod._admin_key_for("h", "root", 22)
     check("migration: falls back to the legacy unrestricted key when the write "
           "key is not authorised yet (so an existing host needs no manual redo)",
-          chosen is not None and Path(chosen).name == "ismart_agent")
+          chosen is not None and Path(chosen).name == "ipandu_agent")
 
     def rw_works(key, host, user, port, cmd, timeout=30):
-        return proc(stdout="ISMART_ADMIN_OK\n")
+        return proc(stdout="IPANDU_ADMIN_OK\n")
     with patch.object(mod, "_ssh_as", side_effect=rw_works):
         chosen = mod._admin_key_for("h", "root", 22)
     check("...but prefers the proper write key whenever it works",
@@ -199,10 +199,10 @@ if HAVE_KEYGEN:
 calls = []
 def install_ok_verify_bad(key, host, user, port, cmd, timeout=30):
     calls.append(cmd)
-    if "ISMART_ADMIN_OK" in cmd:
-        return proc(stdout="ISMART_ADMIN_OK\n")
-    if "ISMART_GUARD_INSTALLED" in cmd:
-        return proc(stdout="ISMART_GUARD_INSTALLED\n")
+    if "IPANDU_ADMIN_OK" in cmd:
+        return proc(stdout="IPANDU_ADMIN_OK\n")
+    if "IPANDU_GUARD_INSTALLED" in cmd:
+        return proc(stdout="IPANDU_GUARD_INSTALLED\n")
     if "hostname" in cmd:
         return proc(stdout="node1\n")
     return proc(stdout="WRITE_WENT_THROUGH\n")     # verification will fail
@@ -222,10 +222,10 @@ if HAVE_KEYGEN:
     # agent out of the very host it had just secured.
     def all_good(key, host, user, port, cmd, timeout=30):
         calls.append(cmd)
-        if "ISMART_ADMIN_OK" in cmd:
-            return proc(stdout="ISMART_ADMIN_OK\n")
-        if "ISMART_GUARD_INSTALLED" in cmd:
-            return proc(stdout="ISMART_GUARD_INSTALLED\n")
+        if "IPANDU_ADMIN_OK" in cmd:
+            return proc(stdout="IPANDU_ADMIN_OK\n")
+        if "IPANDU_GUARD_INSTALLED" in cmd:
+            return proc(stdout="IPANDU_GUARD_INSTALLED\n")
         if "hostname" in cmd:
             return proc(stdout="node1\n")
         return proc(stderr=GUARD_MSG, rc=126)
@@ -255,7 +255,7 @@ if HAVE_KEYGEN:
 # had installed agent_readonly.pub by hand before registering the machine, so
 # authorized_keys held:
 #
-#     ssh-ed25519 AAAA...KPw7j68... ismart-la-readonly     <- no command=
+#     ssh-ed25519 AAAA...KPw7j68... ipandu-readonly     <- no command=
 #
 # install_node_guard() asked only "is this key present?", found it, and skipped
 # adding the guarded line. It reported success. The node was left authorising
@@ -284,7 +284,7 @@ if shutil.which("bash"):
         """The exact remote script, with the guard's install path redirected so
         it needs no root, and $HOME pointed at a scratch tree."""
         # _admin_key_for() probes over _ssh_as too, and returns None unless it
-        # sees ISMART_ADMIN_OK -- in which case install_node_guard() bails out
+        # sees IPANDU_ADMIN_OK -- in which case install_node_guard() bails out
         # before building any script at all. Answering only the install call
         # made capture_script() hand back "", every execution check below then
         # "ran" an empty script, and the failures pointed at the guard rather
@@ -292,10 +292,10 @@ if shutil.which("bash"):
         # script -- the one carrying the guard heredoc -- is captured.
         sent = []
         def grab(key, host, user, port, cmd, timeout=30):
-            if "ISMART_ADMIN_OK" in cmd:
-                return proc(stdout="ISMART_ADMIN_OK\n")
+            if "IPANDU_ADMIN_OK" in cmd:
+                return proc(stdout="IPANDU_ADMIN_OK\n")
             sent.append(cmd)
-            return proc(stdout="ISMART_GUARD_INSTALLED\n")
+            return proc(stdout="IPANDU_GUARD_INSTALLED\n")
         with patch.object(mod, "_ssh_as", side_effect=grab), \
              patch.object(mod, "NODE_GUARD_REMOTE",
                           bashpath(host_ak_dir / "pve-ro-guard")):
@@ -327,7 +327,7 @@ if shutil.which("bash"):
         script = capture_script(target)
         r = run_script(script, target)
         check("the generated script runs cleanly against a hand-prepared host",
-              r.returncode == 0 and "ISMART_GUARD_INSTALLED" in r.stdout)
+              r.returncode == 0 and "IPANDU_GUARD_INSTALLED" in r.stdout)
         if r.returncode != 0:
             print("   stderr:", (r.stderr or "").strip()[:300])
 
@@ -355,8 +355,8 @@ if shutil.which("bash"):
         check("the write key, which is SUPPOSED to be unrestricted, is untouched",
               any(l == rw_pub for l in lines))
         check("the pre-existing authorized_keys is backed up before being rewritten",
-              (target / ".ssh" / "authorized_keys.ismart-bak").exists())
-        backup_first = (target / ".ssh" / "authorized_keys.ismart-bak").read_text(encoding="utf-8")
+              (target / ".ssh" / "authorized_keys.ipandu-bak").exists())
+        backup_first = (target / ".ssh" / "authorized_keys.ipandu-bak").read_text(encoding="utf-8")
         check("...and the backup holds the ORIGINAL, not our own output",
               ro_pub in backup_first and 'command="' not in backup_first)
 
@@ -367,7 +367,7 @@ if shutil.which("bash"):
         check("re-running lands byte-for-byte the same file",
               r2.returncode == 0 and ak.read_text(encoding="utf-8") == after_first)
         check("...and does NOT overwrite the backup with a copy of our own work",
-              (target / ".ssh" / "authorized_keys.ismart-bak").read_text(encoding="utf-8") == backup_first)
+              (target / ".ssh" / "authorized_keys.ipandu-bak").read_text(encoding="utf-8") == backup_first)
 
         # The other direction: prove the OLD logic really did leave this host
         # open, so nobody later "simplifies" the fix back into a presence check.

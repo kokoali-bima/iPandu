@@ -174,10 +174,10 @@ check("the advice exists in both languages",
       "PasswordAuthentication no" in advice_id and "PasswordAuthentication no" in advice_en)
 check("it writes a DROP-IN, not a sed over the main config -- which "
       "60-cloudimg-settings.conf would silently override",
-      "sshd_config.d/00-ismart-hardening.conf" in advice_id
+      "sshd_config.d/00-ipandu-hardening.conf" in advice_id
       and "sed -i" not in advice_id)
 check("the filename sorts FIRST, because sshd takes the first value it reads",
-      "00-ismart-hardening" in advice_id)
+      "00-ipandu-hardening" in advice_id)
 check("it validates the config before reloading, so a typo cannot lock anyone out",
       "sshd -t &" in advice_id)
 check("it reloads rather than restarts, so live sessions survive",
