@@ -2878,6 +2878,19 @@ def register_mcp_server(name: str, command: str, args: list[str]) -> None:
     _sync_agy_mcp(["add", name, command, *args])
 
 
+def register_mcp_http_server(name: str, url: str) -> None:
+    servers = read_mcp_servers()
+    servers[name] = {"type": "http", "url": url}
+    _write_mcp_servers(servers)
+    logger.warning("HTTP MCP server registered: %s -> %s", name, url)
+    try:
+        subprocess.run([CLAUDE_BIN, "mcp", "add", "--transport", "http", name, url],
+                       capture_output=True, text=True, timeout=15)
+    except Exception:
+        pass
+    _sync_agy_mcp(["add", "--transport", "http", name, url])
+
+
 def remove_mcp_server(name: str) -> bool:
     servers = read_mcp_servers()
     if name not in servers:
@@ -2885,6 +2898,11 @@ def remove_mcp_server(name: str) -> bool:
     del servers[name]
     _write_mcp_servers(servers)
     logger.warning("MCP server removed: %s", name)
+    try:
+        subprocess.run([CLAUDE_BIN, "mcp", "remove", name],
+                       capture_output=True, text=True, timeout=15)
+    except Exception:
+        pass
     _sync_agy_mcp(["remove", name])
     return True
 
@@ -7658,14 +7676,15 @@ async def cmd_addmcp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def _begin_mcp_http_login(update: Update, query, name: str, url: str) -> None:
-    """Start an OAuth flow for an HTTP Remote MCP server via claude mcp add.
+    """Start an OAuth flow for an HTTP Remote MCP server via claude mcp login.
 
     Uses the same tmux + LoginHandle machinery as Claude/AGY login:
-    1. Run `claude mcp add --transport http <name> <url>` in a tmux pane.
-    2. Wait for an OAuth URL to appear in the pane output.
-    3. Send the URL to Telegram so the operator can open it in a browser.
-    4. Wait for the operator to paste the code back; forward it to tmux.
-    5. On success: write to mcp_servers.json and sync to agy.
+    1. Ensure `claude mcp add --transport http <name> <url>` is in local config.
+    2. Run `claude mcp login <name>` in a tmux pane.
+    3. Wait for an OAuth URL to appear in the pane output.
+    4. Send the URL to Telegram so the operator can open it in a browser.
+    5. Wait for the operator to paste the redirect URL or code back; forward it to tmux.
+    6. On success: write to mcp_servers.json and sync to agy.
     """
     lang = _chat_lang(update)
 
@@ -7677,20 +7696,34 @@ async def _begin_mcp_http_login(update: Update, query, name: str, url: str) -> N
 
     if not tmux_available():
         await _reply(_t(lang,
-            "\u26a0\ufe0f tmux isn't installed -- needed to drive the OAuth screen.\n"
+            "⚠️ tmux isn't installed -- needed to drive the OAuth screen.\n"
             "Install it (<code>apt install tmux</code>) and try again.",
-            "\u26a0\ufe0f tmux belum terpasang -- dibutuhkan untuk layar OAuth.\n"
+            "⚠️ tmux belum terpasang -- dibutuhkan untuk layar OAuth.\n"
             "Pasang dulu (<code>apt install tmux</code>) lalu coba lagi.",
         ), parse_mode="HTML")
         return
 
     human = f"MCP:{name}"
-    cmd = [CLAUDE_BIN, "mcp", "add", "--transport", "http", name, url]
-    handle = LoginHandle(session=f"ipandu-login-mcp-{name}", command=cmd)
     await _reply(_t(lang,
-        f"\u23f3 Starting OAuth for <b>{_tg_escape(name)}</b>\u2026",
-        f"\u23f3 Memulai OAuth untuk <b>{_tg_escape(name)}</b>\u2026",
+        f"⏳ Starting OAuth for <b>{_tg_escape(name)}</b>…",
+        f"⏳ Memulai OAuth untuk <b>{_tg_escape(name)}</b>…",
     ), parse_mode="HTML")
+
+    # Step 1: Ensure MCP server is registered in Claude Code config
+    try:
+        await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(
+                [CLAUDE_BIN, "mcp", "add", "--transport", "http", name, url],
+                capture_output=True, text=True, timeout=20
+            )
+        )
+    except Exception as exc:
+        logger.warning("claude mcp add warning for %s: %s", name, exc)
+
+    # Step 2: Run interactive login via tmux
+    cmd = [CLAUDE_BIN, "mcp", "login", name]
+    handle = LoginHandle(session=f"ipandu-login-mcp-{name}", command=cmd)
 
     try:
         handle.start()
@@ -7699,8 +7732,8 @@ async def _begin_mcp_http_login(update: Update, query, name: str, url: str) -> N
     except Exception as exc:
         logger.exception("MCP HTTP login start failed for %s", name)
         await _reply(_t(lang,
-            f"\u26a0\ufe0f Couldn't start the OAuth flow: {exc}",
-            f"\u26a0\ufe0f Gagal memulai OAuth: {exc}",
+            f"⚠️ Couldn't start the OAuth flow: {exc}",
+            f"⚠️ Gagal memulai OAuth: {exc}",
         ))
         return
 
@@ -7709,20 +7742,20 @@ async def _begin_mcp_http_login(update: Update, query, name: str, url: str) -> N
     if oauth_url is None:
         screen = handle.pane()
         handle.kill()
-        if LoginHandle.already_done(screen):
+        if LoginHandle.already_done(screen) or "already authenticated" in screen.lower():
             register_mcp_http_server(name, url)
             await _reply(_t(lang,
-                f"\u2705 <b>{_tg_escape(name)}</b> connected (already authenticated).\n\n"
+                f"✅ <b>{_tg_escape(name)}</b> connected (already authenticated).\n\n"
                 "<i>Takes effect on the next new conversation -- /new applies it now.</i>",
-                f"\u2705 <b>{_tg_escape(name)}</b> terhubung (sudah terautentikasi).\n\n"
+                f"✅ <b>{_tg_escape(name)}</b> terhubung (sudah terautentikasi).\n\n"
                 "<i>Berlaku di percakapan baru berikutnya -- /new untuk langsung terapkan.</i>",
             ), parse_mode="HTML")
         else:
             await _reply(_t(lang,
-                f"\u26a0\ufe0f Couldn't find an OAuth URL for <b>{_tg_escape(name)}</b>.\n\n"
+                f"⚠️ Couldn't find an OAuth URL for <b>{_tg_escape(name)}</b>.\n\n"
                 f"Last output:\n<pre>{_tg_escape(screen[-500:])}</pre>\n\n"
                 "Try again with /addmcp.",
-                f"\u26a0\ufe0f Tidak ketemu URL OAuth untuk <b>{_tg_escape(name)}</b>.\n\n"
+                f"⚠️ Tidak ketemu URL OAuth untuk <b>{_tg_escape(name)}</b>.\n\n"
                 f"Output terakhir:\n<pre>{_tg_escape(screen[-500:])}</pre>\n\n"
                 "Coba lagi dengan /addmcp.",
             ), parse_mode="HTML")
@@ -7739,17 +7772,18 @@ async def _begin_mcp_http_login(update: Update, query, name: str, url: str) -> N
 
     safe_url = _tg_escape(oauth_url)
     await _reply(_t(lang,
-        f"\U0001f517 <b>Connect {_tg_escape(name)}</b>\n\n"
-        f"1. Copy this link and open it in a browser:\n<code>{safe_url}</code>\n\n"
-        "2. Approve access, then copy the code you receive back.\n"
-        "3. <b>Send that code here as your next message.</b>\n\n"
-        "<i>The code is single-use and expires quickly. Send /cancel to stop.</i>",
-        f"\U0001f517 <b>Hubungkan {_tg_escape(name)}</b>\n\n"
-        f"1. Salin link ini dan buka di browser:\n<code>{safe_url}</code>\n\n"
-        "2. Setujui aksesnya, lalu salin kode yang muncul.\n"
-        "3. <b>Kirim kode itu di sini sebagai pesan berikutnya.</b>\n\n"
-        "<i>Kodenya sekali-pakai dan cepat kedaluwarsa. Kirim /cancel untuk berhenti.</i>",
+        f"🔗 <b>Connect {_tg_escape(name)}</b>\n\n"
+        f"1. Open this authorization link in your browser:\n<code>{safe_url}</code>\n\n"
+        "2. Approve access. If redirected to a localhost address that won't load, copy the full URL from your browser address bar (or the code if shown).\n\n"
+        "3. <b>Paste and send that URL or code here as your next message.</b>\n\n"
+        "<i>Send /cancel to stop.</i>",
+        f"🔗 <b>Hubungkan {_tg_escape(name)}</b>\n\n"
+        f"1. Buka link otorisasi ini di browser Anda:\n<code>{safe_url}</code>\n\n"
+        "2. Setujui akses (Approve). Jika diarahkan ke halaman localhost yang tidak terbuka, cukup salin seluruh link/URL di address bar browser (atau kode jika muncul).\n\n"
+        "3. <b>Kirim link/URL atau kode tersebut ke chat ini sebagai balasan.</b>\n\n"
+        "<i>Kirim /cancel untuk membatalkan.</i>",
     ), parse_mode="HTML", disable_web_page_preview=True)
+
 
 async def cmd_rmmcp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """No PIN -- removing a server only ever REDUCES the model's tool surface,
