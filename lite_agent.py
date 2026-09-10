@@ -12668,12 +12668,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # From here on, work with the SCRUBBED text: the credential must not
         # reach _pending_newhost, the model, or anything downstream.
         safe_text = scrub_password(msg.text)
-        dismissed = _dismissed_hosts.get(update.effective_chat.id, ())
-        unknown = [h for h in unregistered_hosts_in(safe_text) if h not in dismissed]
-        if unknown:
-            await offer_register_host(update, context, unknown[0],
-                                      parse_host_hints(safe_text), safe_text)
-            return
+
         # A password used to end the turn here. It no longer does: the operator
         # confirmed the task should run (the credential is part of it), gated by
         # the PIN when the model reaches a write.
