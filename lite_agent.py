@@ -10847,27 +10847,6 @@ async def _pin_verified(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await _begin_addserver(update, query, prefill=(payload or {}).get("prefill"))
         return
 
-    if action == "auto_addmcp":
-        if payload not in _pending_mcp_props:
-            await query.answer(_t(lang, "Expired.", "Kedaluwarsa."), show_alert=True)
-            return
-        item = _pending_mcp_props[payload]
-        if pin_is_set(chat_id):
-            await request_pin(update, "addmcp", item, _t(lang,
-                f"\U0001f50c <b>Connecting {_tg_escape(item['name'])}</b>",
-                f"\U0001f50c <b>Menghubungkan {_tg_escape(item['name'])}</b>",
-            ))
-        else:
-            if item.get("type") == "http":
-                await _begin_mcp_http_login(update, query, item["name"], item["url"])
-            else:
-                register_mcp_server(item["name"], item["command"], item["args"])
-                await _safe_edit(query, _t(lang,
-                    f"\U0001f50c <b>{_tg_escape(item['name'])}</b> registered.\n\n",
-                    f"\U0001f50c <b>{_tg_escape(item['name'])}</b> terdaftar.\n\n",
-                ), parse_mode="HTML")
-        return
-
     if action == "auto_addserver":
         # Everything is already known -- host/user/port from the model's own
         # SERVER: line, kind (and flavour) from the buttons just tapped. The
@@ -11179,6 +11158,7 @@ async def offer_schedules(update: Update, proposals: list[dict]) -> None:
 
 _pending_mcp_props: dict[str, dict] = {}
 
+
 async def offer_mcp_registration(update: Update, proposals: list[dict]) -> None:
     lang = _chat_lang(update)
     for item in proposals:
@@ -11191,10 +11171,10 @@ async def offer_mcp_registration(update: Update, proposals: list[dict]) -> None:
         else:
             cmdline = f"{item['command']} {' '.join(item['args'])}".strip()
             desc = f"<code>{_tg_escape(cmdline)}</code>"
-            
+
         await _msg(update).reply_text(
-            _t(lang, f"\U0001f50c <b>New MCP: {_tg_escape(item['name'])}</b>\n\n",
-                     f"\U0001f50c <b>MCP baru: {_tg_escape(item['name'])}</b>\n\n")
+            _t(lang, f"🔌 <b>New MCP: {_tg_escape(item['name'])}</b>\n\n",
+                     f"🔌 <b>MCP baru: {_tg_escape(item['name'])}</b>\n\n")
             + f"{desc}\n\n"
             + _t(lang, "Register it in /mcpservers?", "Daftarkan ke /mcpservers?"),
             parse_mode="HTML",
@@ -11202,10 +11182,89 @@ async def offer_mcp_registration(update: Update, proposals: list[dict]) -> None:
                 InlineKeyboardButton(
                     _t(lang, f"Connect {_tg_escape(item['name'])} (PIN)",
                              f"Hubungkan {_tg_escape(item['name'])} (PIN)"),
-                    callback_data=f"auto_addmcp:{token}"
+                    callback_data=f"automcp:connect:{token}"
+                ),
+                InlineKeyboardButton(
+                    _t(lang, "✖️ Skip", "✖️ Lewati"),
+                    callback_data=f"automcp:skip:{token}"
                 )
             ]])
         )
+
+
+async def cmd_automcp_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles automcp: tap: skip or connect -- interactive registration for
+    MCP servers proposed conversationally."""
+    query = update.callback_query
+    lang = _chat_lang(update)
+    parts = query.data.split(":")
+    if parts[0] == "auto_addmcp":
+        action = "connect"
+        token = parts[1]
+    else:
+        action = parts[1]
+        token = parts[2] if len(parts) > 2 else ""
+
+    if not await _may_authorize_group_action(update, context):
+        await _safe_answer(query, _t(lang, "Bot owner, or a registered group's own admin.",
+                                   "Pemilik bot, atau admin dari grup yang sudah terdaftar."), show_alert=True)
+        return
+    await _safe_answer(query)
+
+    expired = _t(lang,
+        "That proposal has expired — ask again if you still want it.",
+        "Proposal itu sudah kedaluwarsa — minta lagi kalau masih mau.")
+
+    if action == "skip":
+        item = _pending_mcp_props.pop(token, None)
+        name = _tg_escape(item["name"]) if item else "?"
+        await _safe_edit(query, _t(lang, f"✖️ Not registered: {name}",
+                                          f"✖️ Tidak didaftarkan: {name}"), parse_mode="HTML")
+        return
+
+    if action == "connect":
+        item = _pending_mcp_props.get(token)
+        # Fallback: if process restarted and memory was wiped, try parsing the message card itself
+        if not item and query.message and query.message.text:
+            text = query.message.text
+            m = re.search(r"MCP (?:baru|new):\s*([a-zA-Z0-9_\-]+)", text, re.IGNORECASE)
+            url_m = re.search(r"(https?://\S+)", text)
+            if m and url_m:
+                item = {"name": m.group(1), "type": "http", "url": url_m.group(1)}
+            elif m:
+                # check for cmdline
+                lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+                if len(lines) >= 2:
+                    cmd_parts = lines[1].split()
+                    item = {"name": m.group(1), "type": "stdio", "command": cmd_parts[0], "args": cmd_parts[1:]}
+
+        if not item:
+            await _safe_edit(query, expired)
+            return
+
+        chat_id = update.effective_chat.id
+        if pin_is_set(chat_id):
+            await _safe_edit(query, _t(lang,
+                f"🔌 Connecting <b>{_tg_escape(item['name'])}</b> — confirm with your PIN.",
+                f"🔌 Menghubungkan <b>{_tg_escape(item['name'])}</b> — konfirmasi dengan PIN.",
+            ), parse_mode="HTML")
+            await request_pin(update, "addmcp", item, _t(lang,
+                f"🔌 Confirm connecting <b>{_tg_escape(item['name'])}</b>.",
+                f"🔌 Konfirmasi menghubungkan <b>{_tg_escape(item['name'])}</b>.",
+            ))
+        else:
+            if item.get("type") == "http":
+                await _begin_mcp_http_login(update, query, item["name"], item["url"])
+            else:
+                register_mcp_server(item["name"], item["command"], item["args"])
+                await _safe_edit(query, _t(lang,
+                    f"🔌 <b>{_tg_escape(item['name'])}</b> registered.\n\n"
+                    "<i>Takes effect on the next new conversation -- /new applies it now.</i>",
+                    f"🔌 <b>{_tg_escape(item['name'])}</b> terdaftar.\n\n"
+                    "<i>Berlaku di percakapan baru berikutnya -- /new untuk langsung terapkan.</i>",
+                ), parse_mode="HTML")
+        return
+
 
 async def offer_server_registration(update: Update, proposals: list[dict]) -> None:
     """Ask before registering a host the model just made reachable.
@@ -13652,6 +13711,7 @@ def main() -> None:
     app.add_handler(CommandHandler("adopt", cmd_adopt))
     app.add_handler(CallbackQueryHandler(cmd_schedule_decision, pattern="^sched_(ok|no):"))
     app.add_handler(CallbackQueryHandler(cmd_autosrv_button, pattern="^autosrv:"))
+    app.add_handler(CallbackQueryHandler(cmd_automcp_button, pattern="^(automcp|auto_addmcp):"))
     app.add_handler(CommandHandler("unlock", cmd_unlock))
     app.add_handler(CommandHandler("lock", cmd_lock))
     app.add_handler(CommandHandler("usemodel", cmd_usemodel))
