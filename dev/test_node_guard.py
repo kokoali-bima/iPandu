@@ -45,6 +45,14 @@ HOME = tempfile.mkdtemp(prefix="isla_guard_")
 # assertion still cleans up.
 atexit.register(_shutil.rmtree, str(HOME), ignore_errors=True)
 os.environ["HOME"] = HOME
+# Path.home() reads HOME on POSIX but USERPROFILE on Windows, so setting only
+# HOME left this suite pointed at the developer's REAL home when run there. It
+# generated agent_readonly/agent_write into their own ~/.ssh -- found dated
+# from an earlier run -- and then reported "before setup the gate is inert" as
+# a failure on the next run, because the keys it had littered were still there.
+# A test that fails only on the second run, for a reason outside the code under
+# test, is worse than no test.
+os.environ["USERPROFILE"] = HOME
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "t")
 os.environ.setdefault("ALLOWED_USER_IDS", "111")
 os.environ["ALLOWED_GROUP_IDS"] = ""
@@ -64,21 +72,62 @@ def proc(stdout="", stderr="", rc=0):
 
 HAVE_KEYGEN = shutil.which("ssh-keygen") is not None
 
+
+def _can_symlink() -> bool:
+    """The active key is a symlink swapped atomically, so every check below it
+    needs symlinks to work. Windows refuses them without Developer Mode, which
+    is a property of the dev laptop, not of the bot -- it ships to Linux."""
+    probe = Path(tempfile.mkdtemp(prefix="isla_symlink_probe_"))
+    atexit.register(_shutil.rmtree, str(probe), ignore_errors=True)
+    try:
+        (probe / "l").symlink_to(probe / "t")
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
+CAN_SYMLINK = _can_symlink()
+# Counted and printed, never silent. Suites that quietly dropped checks are how
+# a red run looked green for three releases; a skip has to cost a visible line.
+skipped_checks = 0
+
+
+def skip_block(n: int, why: str) -> None:
+    global skipped_checks
+    skipped_checks += n
+    print(f"SKIP - {n} check(s): {why}")
+
+
 # --- 1. a fresh deployment gets a live gate, unattended --------------------
 if HAVE_KEYGEN:
     check("before setup the gate is inert, exactly as the incident found it",
           mod._keys_configured() is False)
-    check("ensure_write_mode_keys() reports success", mod.ensure_write_mode_keys() is True)
+    # Key GENERATION works anywhere ssh-keygen does; only the last step --
+    # pointing the active key at the read-only one -- needs a symlink, and that
+    # is the one thing a Windows dev laptop refuses. Gate those three checks
+    # and nothing else: gating the whole block dropped eleven checks that were
+    # perfectly capable of running, which is the failure this suite is about.
+    if CAN_SYMLINK:
+        check("ensure_write_mode_keys() reports success",
+              mod.ensure_write_mode_keys() is True)
+    else:
+        mod.ensure_write_mode_keys()   # keys are still generated; the swap is not
+        skip_block(1, "ensure_write_mode_keys() ends in a symlink swap")
     check("...the read-only key now exists", mod.SSH_RO_KEY.exists())
     check("...the write key now exists", mod.SSH_RW_KEY.exists())
     check("...and the gate is no longer inert (THE fix for 'no button ever')",
           mod._keys_configured() is True)
-    check("the active key starts pointed at the READ-ONLY key (locked default)",
-          Path(os.readlink(mod.SSH_ACTIVE_KEY)).name == mod.SSH_RO_KEY.name
-          if mod.SSH_ACTIVE_KEY.is_symlink() else False)
-    before = mod.SSH_RO_KEY.read_bytes()
-    check("re-running is idempotent and does NOT rotate existing keys",
-          mod.ensure_write_mode_keys() is True and mod.SSH_RO_KEY.read_bytes() == before)
+    if CAN_SYMLINK:
+        check("the active key starts pointed at the READ-ONLY key (locked default)",
+              Path(os.readlink(mod.SSH_ACTIVE_KEY)).name == mod.SSH_RO_KEY.name
+              if mod.SSH_ACTIVE_KEY.is_symlink() else False)
+        before = mod.SSH_RO_KEY.read_bytes()
+        check("re-running is idempotent and does NOT rotate existing keys",
+              mod.ensure_write_mode_keys() is True
+              and mod.SSH_RO_KEY.read_bytes() == before)
+    else:
+        skip_block(2, "the locked default and the idempotence re-run both read "
+                      "the active-key symlink")
 else:
     print("SKIP - ssh-keygen unavailable, key-generation cases skipped")
 
@@ -118,7 +167,11 @@ check("a host the read-only key cannot even read is not called protected",
 # --- 3. the legacy-key migration path -------------------------------------
 if HAVE_KEYGEN:
     legacy = Path(HOME) / ".ssh" / "ismart_agent"
-    legacy.write_text("x")
+    # The bot creates ~/.ssh itself on a real host; here the scratch home
+    # is empty, so the migration fixture has to make the directory it is
+    # pretending already existed.
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("x", encoding="utf-8")
     def only_legacy_works(key, host, user, port, cmd, timeout=30):
         if Path(key).name == "ismart_agent":
             return proc(stdout="ISMART_ADMIN_OK\n")
@@ -196,8 +249,162 @@ if HAVE_KEYGEN:
     check("...and it is the step that actually edits authorized_keys",
           any("sed -i" in c for c in calls))
 
+# --- 5. a key the operator pasted by hand must be REPLACED, not trusted ----
+#
+# Second real incident, 2026-09-05, on a UIN host at 172.16.10.76. The operator
+# had installed agent_readonly.pub by hand before registering the machine, so
+# authorized_keys held:
+#
+#     ssh-ed25519 AAAA...KPw7j68... ismart-la-readonly     <- no command=
+#
+# install_node_guard() asked only "is this key present?", found it, and skipped
+# adding the guarded line. It reported success. The node was left authorising
+# the read-only key as ordinary unrestricted root -- the exact configuration
+# section 2 above exists to catch, reached by a different road.
+#
+# verify_node_guard() did catch it, which is why nothing was lost. But the
+# operator could not finish /addserver, and the same was waiting on every
+# machine prepared by hand.
+#
+# These tests do not match on the script text. They RUN the script the function
+# would send, against a real file, and look at what it produced.
+if shutil.which("bash"):
+    def bashpath(p):
+        """The script under test is written for a POSIX host. On Windows the
+        only bash available is Git Bash, which wants /c/Users/... rather than
+        C:\\Users\\... -- and silently misbehaves when given the latter."""
+        p = str(p)
+        if os.name == "nt":
+            p = p.replace("\\", "/")
+            if len(p) > 1 and p[1] == ":":
+                p = "/" + p[0].lower() + p[2:]
+        return p
+
+    def capture_script(host_ak_dir):
+        """The exact remote script, with the guard's install path redirected so
+        it needs no root, and $HOME pointed at a scratch tree."""
+        # _admin_key_for() probes over _ssh_as too, and returns None unless it
+        # sees ISMART_ADMIN_OK -- in which case install_node_guard() bails out
+        # before building any script at all. Answering only the install call
+        # made capture_script() hand back "", every execution check below then
+        # "ran" an empty script, and the failures pointed at the guard rather
+        # than at the mock. So the probe is answered as well, and only the real
+        # script -- the one carrying the guard heredoc -- is captured.
+        sent = []
+        def grab(key, host, user, port, cmd, timeout=30):
+            if "ISMART_ADMIN_OK" in cmd:
+                return proc(stdout="ISMART_ADMIN_OK\n")
+            sent.append(cmd)
+            return proc(stdout="ISMART_GUARD_INSTALLED\n")
+        with patch.object(mod, "_ssh_as", side_effect=grab), \
+             patch.object(mod, "NODE_GUARD_REMOTE",
+                          bashpath(host_ak_dir / "pve-ro-guard")):
+            mod.install_node_guard("h", "root", 22)
+        # Never let a silent "" reach the shell: an empty script exits 0 and
+        # touches nothing, which reads exactly like a broken guard.
+        assert sent, "install_node_guard() built no script -- the mock is wrong"
+        return sent[0]
+
+    def run_script(script, home):
+        return subprocess.run(["bash", "-c", script], capture_output=True,
+                              text=True,
+                              env={**os.environ, "HOME": bashpath(home)})
+
+    if HAVE_KEYGEN:
+        ro_pub = mod.SSH_RO_KEY.with_suffix(".pub").read_text(encoding="utf-8").strip()
+        ro_blob = ro_pub.split()[1]
+        rw_pub = mod.SSH_RW_KEY.with_suffix(".pub").read_text(encoding="utf-8").strip()
+
+        # A machine prepared by hand: the read-only key present, unrestricted,
+        # plus an unrelated key that has every right to still be there.
+        target = Path(tempfile.mkdtemp(prefix="isla_ak_"))
+        atexit.register(_shutil.rmtree, str(target), ignore_errors=True)
+        (target / ".ssh").mkdir()
+        ak = target / ".ssh" / "authorized_keys"
+        someone_else = "ssh-rsa AAAAB3NzaC1yc2ETESTKEY admin@laptop"
+        ak.write_text(f"{someone_else}\n{ro_pub}\n{rw_pub}\n", encoding="utf-8")
+
+        script = capture_script(target)
+        r = run_script(script, target)
+        check("the generated script runs cleanly against a hand-prepared host",
+              r.returncode == 0 and "ISMART_GUARD_INSTALLED" in r.stdout)
+        if r.returncode != 0:
+            print("   stderr:", (r.stderr or "").strip()[:300])
+
+        lines = [l for l in ak.read_text(encoding="utf-8").splitlines() if l.strip()]
+        ro_lines = [l for l in lines if ro_blob in l]
+        # Stated as "no UNGUARDED line survives" rather than "the key appears
+        # once": the fixture starts with exactly one unguarded line, so a
+        # count-based check passes when the script does nothing at all -- which
+        # is precisely the failure being tested for.
+        check("no unguarded line carrying the read-only key survives "
+              "(THE 172.16.10.76 bug)",
+              not [l for l in ro_lines if not l.startswith('command="')])
+        check("...and the key is not duplicated in the process",
+              len(ro_lines) == 1)
+        check("...and the line that survives carries the guard, so the key can "
+              "no longer be used as unrestricted root",
+              len(ro_lines) == 1 and ro_lines[0].startswith('command="'))
+        check("...naming the guard binary, not just any command=",
+              len(ro_lines) == 1 and mod.NODE_GUARD_REMOTE in ro_lines[0]
+              or any("pve-ro-guard" in l for l in ro_lines))
+        check("...and no-pty, so the key cannot open an interactive shell",
+              len(ro_lines) == 1 and "no-pty" in ro_lines[0])
+        check("somebody else's key is left completely alone",
+              someone_else in lines)
+        check("the write key, which is SUPPOSED to be unrestricted, is untouched",
+              any(l == rw_pub for l in lines))
+        check("the pre-existing authorized_keys is backed up before being rewritten",
+              (target / ".ssh" / "authorized_keys.ismart-bak").exists())
+        backup_first = (target / ".ssh" / "authorized_keys.ismart-bak").read_text(encoding="utf-8")
+        check("...and the backup holds the ORIGINAL, not our own output",
+              ro_pub in backup_first and 'command="' not in backup_first)
+
+        # Idempotence is what makes /secure safe to re-run, and re-running is
+        # how the operator confirms nothing has drifted.
+        after_first = ak.read_text(encoding="utf-8")
+        r2 = run_script(capture_script(target), target)
+        check("re-running lands byte-for-byte the same file",
+              r2.returncode == 0 and ak.read_text(encoding="utf-8") == after_first)
+        check("...and does NOT overwrite the backup with a copy of our own work",
+              (target / ".ssh" / "authorized_keys.ismart-bak").read_text(encoding="utf-8") == backup_first)
+
+        # The other direction: prove the OLD logic really did leave this host
+        # open, so nobody later "simplifies" the fix back into a presence check.
+        legacy = Path(tempfile.mkdtemp(prefix="isla_ak_old_"))
+        atexit.register(_shutil.rmtree, str(legacy), ignore_errors=True)
+        (legacy / ".ssh").mkdir()
+        legacy_ak = legacy / ".ssh" / "authorized_keys"
+        legacy_ak.write_text(f"{ro_pub}\n", encoding="utf-8")
+        old_check = (
+            f"grep -qF '{ro_blob[:40]}' ~/.ssh/authorized_keys || "
+            f"printf '%s\\n' '{mod._GUARD_KEY_OPTS} {ro_pub}' >> ~/.ssh/authorized_keys"
+        )
+        run_script(old_check, legacy)
+        check("the OLD presence-only check leaves the host unguarded -- the "
+              "regression this section exists to prevent",
+              'command="' not in legacy_ak.read_text(encoding="utf-8"))
+
+        # A clean machine must still work: this fix must not depend on there
+        # being something to replace.
+        fresh = Path(tempfile.mkdtemp(prefix="isla_ak_new_"))
+        atexit.register(_shutil.rmtree, str(fresh), ignore_errors=True)
+        (fresh / ".ssh").mkdir()
+        fresh_ak = fresh / ".ssh" / "authorized_keys"
+        fresh_ak.write_text("", encoding="utf-8")
+        r3 = run_script(capture_script(fresh), fresh)
+        fresh_lines = [l for l in fresh_ak.read_text(encoding="utf-8").splitlines() if l.strip()]
+        check("a host with no keys at all still ends up guarded",
+              r3.returncode == 0
+              and any(ro_blob in l and l.startswith('command="') for l in fresh_lines))
+        check("...and authorized_keys is never left empty",
+              fresh_ak.read_text(encoding="utf-8").strip() != "")
+else:
+    print("SKIP - bash unavailable, generated-script execution cases skipped")
+
 failed = [n for n, ok in results if not ok]
-print(f"\n{len(results) - len(failed)}/{len(results)} passed")
+print(f"\n{len(results) - len(failed)}/{len(results)} passed"
+      + (f", {skipped_checks} skipped" if skipped_checks else ""))
 if failed:
     print("FAILED:", failed)
     sys.exit(1)

@@ -38,11 +38,18 @@ ask()  { read -rp "$(echo -e "${BOLD}$1${RESET}")" "$2"; }
 
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_USER="$(whoami)"
+# Overridable so a second deployment on the same host gets its own unit rather
+# than overwriting the first one's:
+#   SERVICE_NAME=lite-agent-ops ./install.sh
+# Everything else was already per-clone (BASE_DIR-relative) or per-user; the
+# unit name in /etc/systemd/system was the one genuinely shared thing left.
+SERVICE_NAME="${SERVICE_NAME:-lite-agent}"
 
 echo ""
 echo "${BOLD}iSmart-LA installer${RESET}  ${DIM}(lightweight Telegram bridge to Claude Code + Antigravity CLI)${RESET}"
 echo "Install dir: ${INSTALL_DIR}"
 echo "Running as:  ${INSTALL_USER}"
+echo "Service:     ${SERVICE_NAME}"
 echo ""
 
 if [ "$INSTALL_USER" = "root" ]; then
@@ -82,11 +89,32 @@ fi
 # is what lets the agent fetch a video someone asks for, and a deployment that
 # never does that loses nothing by its absence.
 if ! command -v yt-dlp >/dev/null 2>&1; then
-    say "Fetching yt-dlp (video download helper)"
-    if sudo curl -sL -o /usr/local/bin/yt-dlp         https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux         && sudo chmod +x /usr/local/bin/yt-dlp; then
-        ok "yt-dlp $(yt-dlp --version 2>/dev/null || echo installed)"
+    # yt-dlp's standalone binary asset is architecture-specific; confirmed
+    # against the real release listing, not assumed. amd64 and arm64 are the
+    # two real cases (a VM, or a Pi/Ampere/Graviton box); anything else is
+    # left to the operator rather than silently fetching a binary that can't
+    # run here.
+    case "$(uname -m)" in
+        x86_64|amd64) _YTDLP_ASSET="yt-dlp_linux" ;;
+        aarch64|arm64) _YTDLP_ASSET="yt-dlp_linux_aarch64" ;;
+        *) _YTDLP_ASSET="" ;;
+    esac
+    if [ -z "$_YTDLP_ASSET" ]; then
+        warn "No prebuilt yt-dlp for this architecture ($(uname -m)) -- asking the agent to find a video won't work until it is installed manually."
     else
-        warn "Could not fetch yt-dlp -- asking the agent to find a video won't work until it is installed."
+        say "Fetching yt-dlp (video download helper)"
+        if sudo curl -sL -o /usr/local/bin/yt-dlp "https://github.com/yt-dlp/yt-dlp/releases/latest/download/${_YTDLP_ASSET}" \
+          && sudo chmod +x /usr/local/bin/yt-dlp \
+          && _YTDLP_VER="$(yt-dlp --version 2>/dev/null)"; then
+            # The version check above is the real gate, not the curl exit
+            # code: a wrong-architecture binary downloads and chmods fine and
+            # only fails here, with "Exec format error" -- exactly the
+            # failure `|| echo installed` used to hide.
+            ok "yt-dlp $_YTDLP_VER"
+        else
+            sudo rm -f /usr/local/bin/yt-dlp
+            warn "Could not fetch a working yt-dlp -- asking the agent to find a video won't work until it is installed."
+        fi
     fi
 else
     ok "yt-dlp already present."
@@ -213,6 +241,17 @@ CLAUDE_BIN=${CLAUDE_BIN_PATH}
 # ANTHROPIC_BASE_URL=
 # ANTHROPIC_API_KEY=
 EOF
+# Written ONLY when it is not the default, to keep .env free of settings that
+# merely restate a default -- but written whenever it IS custom, because the
+# running process needs to know its own unit name: /update restarts
+# SERVICE_NAME and refresh_systemd_unit() writes that unit's file. Without
+# this line the bot would manage `lite-agent` while systemd runs it under a
+# different name -- restarting a service that does not exist and rewriting
+# the other deployment's unit.
+if [ "$SERVICE_NAME" != "lite-agent" ]; then
+  echo "" >> "$ENV_FILE"
+  echo "SERVICE_NAME=${SERVICE_NAME}" >> "$ENV_FILE"
+fi
 chmod 600 "$ENV_FILE"
 ok ".env written and locked down (chmod 600)."
 
@@ -230,7 +269,7 @@ ok "Briefs in place. /start will ask what this agent looks after."
 # ------------------------------------------------------------------------------
 say "Step 7/8 -- systemd service"
 # ------------------------------------------------------------------------------
-SERVICE_FILE="/etc/systemd/system/lite-agent.service"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 sed \
   -e "s|__INSTALL_USER__|${INSTALL_USER}|g" \
   -e "s|__INSTALL_DIR__|${INSTALL_DIR}|g" \
@@ -256,12 +295,20 @@ say "Step 8/8 -- basic hardening"
 # at 644 -- every chat's conversation state and token history readable by any
 # account on the box.
 HARDENED=0
-for f in .env pin.json sessions.json sessions.json.bak spend.jsonl          allowed_groups.json servers.json schedules.json snapshots.json          setup_state.json model_overrides.json chat_language.json          gdrive_room_accounts.json gdrive_oauth_client.json \n         mcp_servers.json MEMORY.md OWNER_SCOPE.md; do
+# Keep this list in step with HARDEN_600 in lite_agent.py -- the two cover the
+# same files from the two directions (install time, and every start/update).
+# dev/test_service_name.py asserts they have not drifted apart.
+for f in .env pin.json sessions.json sessions.json.bak spend.jsonl \
+         allowed_groups.json servers.json schedules.json snapshots.json \
+         setup_state.json model_overrides.json chat_language.json \
+         gdrive_room_accounts.json gdrive_oauth_client.json \
+         mcp_servers.json MEMORY.md OWNER_SCOPE.md; do
   if [ -f "$INSTALL_DIR/$f" ]; then
     chmod 600 "$INSTALL_DIR/$f" 2>/dev/null && HARDENED=$((HARDENED + 1))
   fi
 done
 [ -d "$INSTALL_DIR/memory" ] && chmod 700 "$INSTALL_DIR/memory" 2>/dev/null
+[ -d "$INSTALL_DIR/chatscope" ] && chmod 700 "$INSTALL_DIR/chatscope" 2>/dev/null
 [ -d "$INSTALL_DIR/incoming" ] && chmod 700 "$INSTALL_DIR/incoming" 2>/dev/null
 # Credentials the CLIs and rclone keep in $HOME. Never created by this script,
 # but a wrong mode here is worth as much to an attacker as the bot's own files.
@@ -270,7 +317,7 @@ for c in "$HOME/.config/rclone/rclone.conf" "$HOME/.claude.json"; do
   [ -f "$c" ] && chmod 600 "$c" 2>/dev/null
 done
 ok "Secrets and state locked to owner-only (${HARDENED} file(s) in ${INSTALL_DIR})."
-say "  Sandbox: systemd-analyze security lite-agent   (expect ~5.8 MEDIUM, was 9.6 UNSAFE)"
+say "  Sandbox: systemd-analyze security ${SERVICE_NAME}   (expect ~5.8 MEDIUM, was 9.6 UNSAFE)"
 say "  This bot needs NO inbound ports. If this host is reachable from outside,"
 say "  a firewall allowing only SSH in is worth the two minutes:"
 say "    sudo ufw default deny incoming && sudo ufw allow OpenSSH && sudo ufw enable"
@@ -278,8 +325,8 @@ say "    sudo ufw default deny incoming && sudo ufw allow OpenSSH && sudo ufw en
 echo ""
 echo "${BOLD}${GREEN}Done.${RESET} Start it:"
 echo ""
-echo "  ${CYAN}sudo systemctl enable --now lite-agent${RESET}"
-echo "  ${CYAN}journalctl -u lite-agent -f${RESET}   (watch logs)"
+echo "  ${CYAN}sudo systemctl enable --now ${SERVICE_NAME}${RESET}"
+echo "  ${CYAN}journalctl -u ${SERVICE_NAME} -f${RESET}   (watch logs)"
 echo ""
 echo "${BOLD}Then open Telegram and send your bot /start.${RESET} Everything left is there:"
 echo "  - sign in to Gemini and to Claude (a URL to open, a code to paste back)"

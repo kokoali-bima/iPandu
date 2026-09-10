@@ -43,6 +43,9 @@ _scratch = tempfile.mkdtemp(prefix="isla_gdriveconnect_")
 # the end, so a failing assertion still cleans up.
 atexit.register(_shutil.rmtree, _scratch, ignore_errors=True)
 os.environ["HOME"] = _scratch
+# Path.home() ignores HOME on Windows -- USERPROFILE is what it reads,
+# so a suite setting only HOME silently tests the real home there.
+os.environ["USERPROFILE"] = _scratch
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "t")
 os.environ.setdefault("ALLOWED_USER_IDS", "111")
 os.environ["ALLOWED_GROUP_IDS"] = ""

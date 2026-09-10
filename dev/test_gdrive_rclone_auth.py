@@ -47,6 +47,9 @@ sys.path.insert(0, str(Path(SRC).resolve().parent / "tools"))
 scratch = Path(tempfile.mkdtemp(prefix="isla_rcauth_t_"))
 atexit.register(_shutil.rmtree, str(scratch), ignore_errors=True)
 os.environ["HOME"] = str(scratch)
+# Path.home() ignores HOME on Windows -- USERPROFILE is what it reads,
+# so a suite setting only HOME silently tests the real home there.
+os.environ["USERPROFILE"] = str(scratch)
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "t")
 os.environ.setdefault("ALLOWED_USER_IDS", "111")
 os.environ["ALLOWED_GROUP_IDS"] = ""
@@ -164,7 +167,7 @@ check("a leftover 'rclone authorize' is killed first, so the port is free",
 # --- 5. cleanup removes a file holding a LIVE refresh token ---------------
 log_dir = Path(tempfile.mkdtemp(prefix="isla_rc_log_"))
 log = log_dir / "authorize.log"
-log.write_text('{"access_token":"x","refresh_token":"LIVE"}')
+log.write_text('{"access_token":"x","refresh_token":"LIVE"}', encoding="utf-8")
 mod.gdrive_rclone_cleanup({"pid": None, "log": str(log)})
 check("the authorize log is deleted -- it holds a working refresh token until "
       "it is gone", not log.exists())

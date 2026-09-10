@@ -42,6 +42,9 @@ scratch = Path(tempfile.mkdtemp(prefix="isla_gdrive_"))
 # assertion still cleans up.
 atexit.register(_shutil.rmtree, str(scratch), ignore_errors=True)
 os.environ["HOME"] = str(scratch)
+# Path.home() ignores HOME on Windows -- USERPROFILE is what it reads,
+# so a suite setting only HOME silently tests the real home there.
+os.environ["USERPROFILE"] = str(scratch)
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "t")
 os.environ.setdefault("ALLOWED_USER_IDS", "111")
 os.environ["ALLOWED_GROUP_IDS"] = ""
@@ -70,7 +73,7 @@ if os.name != "nt":
 else:
     print("SKIP - POSIX file modes are not meaningful on Windows")
 
-mod.GDRIVE_CLIENT_FILE.write_text("{ not json")
+mod.GDRIVE_CLIENT_FILE.write_text("{ not json", encoding="utf-8")
 check("a corrupt client file degrades to 'not set up' instead of raising",
       mod.read_gdrive_client() == {})
 mod.write_gdrive_client("123.apps.googleusercontent.com", "secret")
@@ -80,9 +83,22 @@ check("the scope requested is drive.file -- the only Drive scope the device "
       "flow supports, and already what rclone was configured with",
       mod.GDRIVE_DEVICE_SCOPE.endswith("/auth/drive.file"))
 src = Path(SRC).read_text(encoding="utf-8")
-check("...and the rclone remote is still created with scope=drive.file, so "
-      "the device flow changed how the token is obtained, not what it can reach",
-      "scope=drive.file" in src)
+# connect_gdrive_account() gained a `scope` argument when the manual path
+# needed full drive to reach a shared drive, so the literal moved into the
+# default. What must stay true is unchanged and is what is checked: the DEVICE
+# FLOW still ends up at drive.file. It changed how the token is obtained, not
+# what it can reach.
+import ast, inspect  # noqa: E402
+check("connect_gdrive_account still defaults to scope=drive.file",
+      inspect.signature(mod.connect_gdrive_account)
+      .parameters["scope"].default == "drive.file")
+device_call = next((ast.unparse(n) for n in ast.walk(ast.parse(src))
+                    if isinstance(n, ast.Call)
+                    and "connect_gdrive_account" in ast.unparse(n)
+                    and "gdrive_token_to_rclone" in ast.unparse(n)), "")
+check("...and the device-flow call site does not override it", bool(device_call))
+check("...so the device flow reaches exactly what it always did",
+      "'drive'" not in device_call and '"drive"' not in device_call)
 
 # --- 3. the wrong-client-TYPE message, the mistake this setup invites -------
 with patch.object(mod, "_post_form", return_value=(401, {"error": "invalid_client",

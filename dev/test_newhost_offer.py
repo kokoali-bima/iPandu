@@ -32,6 +32,9 @@ SRC = sys.argv[1]
 scratch = Path(tempfile.mkdtemp(prefix="isla_newhost_"))
 atexit.register(_shutil.rmtree, str(scratch), ignore_errors=True)
 os.environ["HOME"] = str(scratch)
+# Path.home() ignores HOME on Windows -- USERPROFILE is what it reads,
+# so a suite setting only HOME silently tests the real home there.
+os.environ["USERPROFILE"] = str(scratch)
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "t")
 os.environ.setdefault("ALLOWED_USER_IDS", "111")
 os.environ["ALLOWED_GROUP_IDS"] = ""
@@ -147,6 +150,9 @@ async def main():
     with patch.object(mod, "_chat_lang", return_value="id"):
         await mod.cmd_newhost_button(u2, None)
     check("cancel clears the pending offer", 7 not in mod._pending_newhost)
+    check("...and remembers the host as dismissed, so it stops re-asking",
+          "192.0.2.10" in mod._dismissed_hosts.get(7, set()))
+    mod._dismissed_hosts.pop(7, None)  # isolate the "skip" case below
 
     # "Just answer" must run the turn, and must NOT ask for a PIN: it grants
     # nothing. The write gate still stands behind it.
@@ -166,6 +172,8 @@ async def main():
     check("'just answer' runs the original question", ran.get("text") == ASK)
     check("...and asks for no PIN, because it grants nothing",
           7 not in mod._pending_newhost)
+    check("...and also remembers the host as dismissed",
+          "192.0.2.10" in mod._dismissed_hosts.get(7, set()))
 
     # Register goes through the PIN, carrying the prefill.
     asked = {}
@@ -193,6 +201,29 @@ async def main():
 import asyncio
 asyncio.run(main())
 
+# --- a dismissed host stops re-asking, but only that host ------------------
+# A firewall or VPN gateway quoted in nearly every message about it -- exactly
+# the OPNsense case that motivated this -- must not reblock the model on every
+# mention once the room has already said "just answer" or "cancel" to it once.
+mod._dismissed_hosts[7] = {"192.0.2.10"}
+still_unknown = [h for h in mod.unregistered_hosts_in(ASK)
+                 if h not in mod._dismissed_hosts.get(7, ())]
+check("a dismissed host is filtered out of what gets offered",
+      still_unknown == [])
+TWO = "cek 192.0.2.10 dan 198.51.100.7 dong"
+still_unknown2 = [h for h in mod.unregistered_hosts_in(TWO)
+                  if h not in mod._dismissed_hosts.get(7, ())]
+check("...while an UNDISMISSED host in the same message still is",
+      still_unknown2 == ["198.51.100.7"])
+check("dismissal is scoped to the chat that dismissed it",
+      "192.0.2.10" not in mod._dismissed_hosts.get(999, ()))
+mod._dismissed_hosts.pop(7, None)
+
+src_dismiss = Path(SRC).read_text(encoding="utf-8")
+check("the real call site actually filters through _dismissed_hosts",
+      "if h not in dismissed" in src_dismiss
+      and "_dismissed_hosts.get(update.effective_chat.id" in src_dismiss)
+
 # --- the wizard still offers the choices the operator expects -------------
 check("the wizard asks hypervisor / single VM / other",
       set(mod.SERVER_KINDS) == {"hypervisor", "vm", "other"})
@@ -219,6 +250,12 @@ INNOCENT = [
     "passwordnya apa ya",
     "password manager mana yang bagus",
     "tolong audit kebijakan password di server",
+    # A plain lowercase word after "password" names WHAT it belongs to, not
+    # a disclosure -- these three swallowed a real question before the fix,
+    # because the handler `return`s on a hit and never reaches the model.
+    "gimana cara reset password proxmox?",
+    "apa password default OPNsense",
+    "gimana cara ganti password mysql",
 ]
 for t in LEAKS:
     check(f"a credential is caught: {t[:34]}", mod.mentions_password(t) is not None)

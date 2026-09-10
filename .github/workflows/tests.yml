@@ -9,9 +9,15 @@ name: tests
 # project's own development machines was ever old enough to catch it by
 # running the code -- this matrix exists specifically to be.
 on:
+  # Upstream runs this on every branch. This fork is private, so every push
+  # is billed Actions minutes -- four Python versions times the full suite,
+  # roughly 30 minutes per push -- and feature branches here push often. The
+  # matrix still earns its keep on master, which is what /update actually
+  # deploys from, so it stays there rather than going dark everywhere.
   push:
-    branches: ["**"]
+    branches: ["master"]
   pull_request:
+    branches: ["master"]
 
 jobs:
   test:

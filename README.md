@@ -1,31 +1,28 @@
-# iPandu
+<div align="center">
 
-An AI assistant for Infrasoft, driven from Telegram — carrying the full
-infrastructure capability of
-[iSmart-LA](https://github.com/kokoali-bima/iSmart-LA) with it.
+# iSmart-LA
+### Lite Agent -- a Telegram bridge to Claude Code & Antigravity CLI
 
-*Pandu* is Indonesian for **guide**. The `i` reads as Infrasoft, or as internet,
-depending on who is looking.
+**Infrastructure monitoring and investigation, at a fraction of a full agent
+framework's token cost.**
 
-Telegram stays the only interface. Other channels — email, WhatsApp, calendar —
-are used as **tools**, not as a second GUI: the agent sends an email the same
-way it sends a file, through the marker protocol, with the same PIN gate on
-anything that leaves the building.
+[![Status](https://img.shields.io/badge/status-v0.2b.99%20beta-blueviolet)](#why-this-exists)
+[![License](https://img.shields.io/badge/license-proprietary-lightgrey)](#credits)
+[![Python](https://img.shields.io/badge/python-3.10--3.13-blue)](#system-requirements)
+[![Architecture](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-success)](#system-requirements)
+[![Tests](https://github.com/kokoali-bima/iSmart-LA/actions/workflows/tests.yml/badge.svg)](https://github.com/kokoali-bima/iSmart-LA/actions/workflows/tests.yml)
 
-> **Status: v0.1.1 — experimental.** This is where new things get tried. The
-> agent that runs production is iSmart-LA, not this one. If you want something
-> stable to look after a cluster, use that repo.
->
-> Forked from iSmart-LA v0.2b.76. Read **[FORK.md](FORK.md)** before changing
-> anything: there is one merge rule that decides whether production fixes can
-> still be pulled in here, or whether every bug has to be fixed twice.
+🚀 [Quick Start](#quickstart) •
+💡 [Features](#features) •
+🖥️ [Requirements](#system-requirements) •
+📋 [Commands](#commands) •
+☁️ [Google Drive](#google-drive-optional) •
+⚠️ [Limitations](#known-limitations) •
+🙏 [Credits](#credits)
 
-Everything below is inherited documentation from iSmart-LA. Most of it still
-applies as written — 79% of the code really is the same.
+</div>
 
 ---
-
-## Inherited from iSmart-LA (Lite Agent)
 
 A lightweight Telegram bridge to **Claude Code** and **Antigravity CLI (agy)**, for
 infrastructure monitoring and investigation -- built to be dramatically cheaper to run
@@ -34,7 +31,7 @@ A report doesn't have to stop at the chat: it can land straight in a shared
 [Google Drive](#google-drive-optional) folder too, connected the same explicit way as
 everything else here -- through Telegram, not a config file.
 
-> **Status: v0.2b.84 -- early/beta.** Built and battle-tested against a real production
+> **Status: v0.2b.99 -- early/beta.** Built and battle-tested against a real production
 > Proxmox VE cluster over several days of iteration, including a live-fire test of the
 > unlock/PIN/snapshot flow against real infrastructure. Works well; still has known
 > rough edges (see [Known limitations](#known-limitations)).
@@ -55,6 +52,13 @@ and a manual (never automatic) memory file. Nothing in this codebase decides on 
 to re-run, review, or "improve" a past turn.
 
 ## Features
+
+| | A full agent framework (tried first, on this same infrastructure) | iSmart-LA |
+|---|---|---|
+| Runaway background loop | ❌ A retrying background-review feature burned **~900,000 tokens** in one incident, unwatched | ✅ Nothing runs unless a human asked, right now -- there is no loop to retry |
+| Same 7-node benchmark task | ❌ **3.5x** the cost, on ordinary turns with nothing going wrong | ✅ Baseline -- four fixed-price tiers, cheapest first |
+| Change access | ❌ Whatever the framework's own defaults happen to allow | ✅ Read-only by default; a destructive command needs a time-boxed, PIN-gated `/unlock` |
+| Where it runs | ❌ Tied to wherever the session lives | ✅ Talk to it from Telegram, from anywhere, while it works on a [1-vCPU VM](#system-requirements) -- amd64 or arm64 |
 
 What it actually does, at a glance -- details and full command reference are further
 down, this is the map.
@@ -87,6 +91,10 @@ down, this is the map.
   secret.
 - `/remember`'s memory is **per chat** -- a fact saved in one group's chat is never
   injected into another chat's next turn.
+- The **role itself can differ per room** (`/setchatscope`), so one deployment can
+  answer a network-engineering group and a research group as the thing each of them
+  needs -- layered on the shared brief, never replacing it, so a boundary added
+  later still reaches every room.
 - The owner alone can grant themselves extra scope that applies **only** in their
   own private DM, never in any group even when they're the one typing there
   (`/setownerscope`).
@@ -119,6 +127,16 @@ down, this is the map.
 - The agent can write a file and hand it back through Telegram, or -- see
   [Google Drive](#google-drive-optional) -- drop it straight into a shared folder,
   connected the same explicit, Telegram-driven way as everything else here.
+- A room's upload folder can be **pinned by browsing to it** (`/gdrivefolder`),
+  and pointed at a **shared drive** specifically (`/gdrivetarget`) -- rclone
+  treats one as a different root, not a longer path, so no destination typed
+  in chat could otherwise reach one.
+
+**A firewall is a machine too**
+- [OPNsense](#opnsense-optional) reads are ungated; writes need the same
+  `/unlock` window as everything else here, and the running config is backed
+  up before the first change of each window -- never a copy of the write-gate
+  rule, the rule itself.
 
 **Stays out of the way when nothing's wrong**
 - `/status`, `/providers`, `/servers`, `/schedules`, `/boundaries`, `/snapshots`,
@@ -212,6 +230,45 @@ it isn't left open to anyone who can merely talk to the bot.
   multiple independent, resumable conversations, so picking up yesterday's case doesn't
   drag in today's unrelated context.
 
+## System requirements
+
+**Two architectures, both first-class: `amd64` and `arm64`.** `install.sh`
+detects the machine and fetches the right build of everything it provisions
+(rclone, yt-dlp); nothing here is amd64-only. Confirmed against the real
+download listings for both, not assumed -- an Ampere/Graviton VM, a Raspberry
+Pi, or an ordinary Intel/AMD box are all supported the same way.
+
+**OS:** Debian 12+ or Ubuntu 22.04+ (or a derivative with `apt-get`) is the
+tested, automatic path -- `install.sh` detects and installs every system
+package itself. Anything else (Alpine, Fedora, a container without `apt`)
+still runs the bot, but `install.sh` stops to list what to install by hand
+instead of doing it for you.
+
+**Python:** 3.10 or newer. 3.10 is `install.sh`'s own stated floor, and CI
+(`.github/workflows/tests.yml`) runs the full suite against 3.10, 3.11, 3.12,
+and 3.13 on every push to `master` -- so the floor is enforced, not just
+claimed.
+
+|  | Minimum | Recommended |
+|---|---|---|
+| **CPU** | 1 vCPU | 2 vCPU (4+ if you'll lean on video re-encoding -- see below) |
+| **RAM** | 1 GB | 2 GB+ |
+| **Disk** | ~2 GB free | 5-10 GB free |
+| **Network** | Outbound HTTPS to Telegram, Anthropic, Google, and GitHub (for `/update`) | Same, plus a stable link -- a flaky one is its own class of bug (see v0.2b.88 in `CHANGELOG.md`) |
+
+The bot itself is a single lightweight Python process, mostly idle between
+messages. What actually uses resources is what it shells out to: both AI
+CLIs run as their own Node.js processes while a turn is in flight, and video
+handling calls `ffmpeg` to re-encode anything over Telegram's 50MB bot limit
+-- **measured on this project's own server**, 90 seconds of 1080p takes about
+32 seconds on 12 cores. Fewer cores means proportionally longer, not a
+failure; a single low-power core will get there, just slowly. The minimum
+row is what keeps the bot itself and one CLI turn running without swapping;
+the recommended row is comfortable headroom for a second concurrent chat and
+the occasional video job. Neither figure is a hard gate anywhere in the code
+-- there's no check enforcing them, this is planning guidance, not a
+requirement `install.sh` verifies.
+
 ## Quickstart
 
 ```bash
@@ -240,6 +297,70 @@ operator already is, not in a terminal session they have to keep open.
 all. [`examples/proxmox/`](./examples/proxmox/) is one worked example, not a required
 shape -- a Kubernetes cluster, a fleet of web servers, or a CI estate all work the
 same way.
+
+### More than one deployment on one host
+
+Two agents with genuinely different jobs -- one that holds SSH keys to production,
+one that only reads papers and writes code -- are better kept apart than merged,
+because the second one's blast radius should not include the first one's
+credentials. Each install is already independent in everything that matters: the
+brief, memory, PIN, sessions, registered servers, MCP registry and ledger are all
+relative to the install directory.
+
+Each one needs its own service name and its own Linux user. `newagent.sh` does
+both, then hands over to `install.sh`:
+
+```bash
+sudo ./newagent.sh ops      # -> user isla-ops,   service lite-agent-ops
+sudo ./newagent.sh build    # -> user isla-build, service lite-agent-build
+```
+
+It refuses to touch an existing user, directory or unit — an existing deployment
+holds a PIN hash, sessions, SSH keys and connected Drive accounts, and
+"provision" must never be able to mean "destroy those". By hand it is the same
+three steps:
+
+```bash
+sudo useradd -m isla-ops
+sudo -u isla-ops git clone <this-repo> /home/isla-ops/lite-agent
+cd /home/isla-ops/lite-agent && SERVICE_NAME=lite-agent-ops ./install.sh
+```
+
+**The sudo rights it grants are narrower than you might expect, on purpose.**
+`/update` ends with `sudo -n systemctl restart <service>`, so exactly that one
+command is granted, for exactly that one unit. `refresh_systemd_unit()` also
+wants to `cp` a rendered unit into `/etc/systemd/system`, and that is **not**
+granted: it would let the service user rewrite its own unit with `User=root` and
+take the host on the next restart, which would make every deployment on the box
+root-equivalent and reduce the separate-user isolation to decoration. The bot
+already treats that write as best-effort — it logs `could not write the unit
+(needs sudo)` and carries on without restarting, so nothing loops. **Refreshing
+the unit after a release that changes the template is an operator action:**
+re-run `install.sh` as root for that deployment.
+
+The broad rights `install.sh` genuinely needs (apt, writing the unit the first
+time) are granted only while it runs, and removed by a trap on every exit path —
+Ctrl-C and a failed install included.
+
+**The service name is not optional.** Two installs sharing one unit name do not
+merely look untidy: each start re-renders `/etc/systemd/system/<name>.service`
+with *its own* directory and user, sees the other's version as out of date,
+rewrites it and restarts -- so the pair restart each other without end. The
+installer records a non-default `SERVICE_NAME` in `.env`, which is what lets the
+running process restart the right unit on `/update`.
+
+**The separate Linux user is not optional either.** These live in `$HOME` and have
+no per-install override, so two deployments under one user still share them:
+
+| | why it matters |
+|---|---|
+| `~/.ssh/agent_active` | `/unlock` in one deployment opens **write mode for both** |
+| `~/.ssh/config` | the `/addserver` block is rewritten by whichever ran last |
+| `~/.config/rclone/rclone.conf` | connected Drive accounts are pooled |
+| agy's MCP registry | `agy mcp add` is global to the user, unlike claude's per-call `--mcp-config` |
+
+Each deployment also needs its **own bot token** from @BotFather -- one token
+polled by two processes gets both rejected with `409 Conflict`.
 
 
 ### The environment brief, and how it fills itself in
@@ -281,11 +402,45 @@ where it lands: always inside the learned zone, never anywhere else. The boundar
 enforced by code, not by the model's cooperation. Bootstrap follows the same rule --
 your hard boundaries are copied in verbatim, never paraphrased by a model.
 
+#### `/setchatscope` -- a different job per room, on one deployment
+
+`/setscope` is one shared setting, and for "what is this bot for" that's the right
+answer. It can't serve the case where a network-engineering group and a research
+group talk to the same bot and genuinely need different roles. `/setchatscope`
+overrides the role **in the chat it's run in, and nowhere else**:
+
+```
+/setchatscope machine-learning research assistant, strong on experiment design
+```
+
+Gated like `/setscope` and `/addserver` -- the owner anywhere, or a registered
+group's own admin inside that group. No PIN: it grants no capability. The tools,
+the machines it can reach and the boundaries are all exactly what they were; only
+the description of the job changes. `/setchatscope clear` returns the room to the
+shared role, and running it bare shows both.
+
+**It adds to the shared brief rather than replacing it, and that's the whole
+design.** Hard boundaries live *inside* the brief -- `/addboundary` rewrites the
+bullet list in `SOUL.md` and `GEMINI.md` -- so a per-chat brief *file* would mean a
+boundary added next week silently never reaching the rooms that have one, with
+nothing to indicate it. A layer can't have that bug: the shared brief still goes
+out in full every turn and the room's role is appended after it, saying in as many
+words that it takes precedence over the role and that the boundaries above it do
+not bend. There's a test that adds a boundary *after* a room has its own role and
+checks it still arrives.
+
+The honest cost: a research room still carries infrastructure-brief text it has no
+use for. That's token overhead, not a hole -- and if a persona shouldn't even *see*
+the other one's brief, the answer is [a separate deployment](#more-than-one-deployment-on-one-host),
+not this.
+
+Per-chat memory (`/remember`) and per-chat model overrides (`/usemodel`) already
+worked this way, so a room can carry its own role, its own facts and its own model
+without any of the three leaking sideways.
+
 #### `/setownerscope` -- extra scope, owner-only, DM-only
 
-`/setscope` is deliberately **one shared setting** -- every group and every DM sees
-the exact same brief, on purpose, so there's one predictable answer to "what is this
-bot for" everywhere it's used. `/setownerscope` sits on top of that for one specific
+`/setownerscope` sits on top of the same base for one specific
 case: the owner wants the bot to also help with general things (a joke, casual
 questions) in their own DM, without loosening what every group gets.
 
@@ -325,52 +480,55 @@ Ollama, say), since something has to translate between protocols.
 
 | Command | Cost | What it does |
 |---|---|---|
-| `/status` | **0 tokens** | Instant status check straight from a script (see `tools/`), no model involved |
-| `/tools` | **0 tokens** | List of "graduated" skills (see below) |
-| `/graduate <name>` | 1 call | Turn the case you *just* solved into a reusable script |
-| `/new` | free | Reset the active session's conversation history (MEMORY.md untouched) |
-| `/session <name>` | free | Create/switch to a named session, for keeping cases separate |
-| `/sessions` | free | List saved sessions |
-| `/remember <fact>` | free | Save a fact permanently, read in every session & every tier |
-| `/memory` | free | View current memory contents |
-| `/learned` | free | What the agent worked out about this environment by itself |
-| `/forget <n>` | free | Delete one wrong learned fact (numbers from `/learned`) |
-| `/chatid` | free, no auth needed | Reveal the current chat's ID (for group/access setup) |
-| `/schedules` | **0 tokens** | Everything that runs on a timer, and what it does |
-| `/unschedule <name>` | owner + DM only | Remove a scheduled task |
-| `/adopt` | owner + DM only | Bring pre-existing cron entries under management |
-| `/setpin` | owner, DM **or group** | Set/change the OWNER's PIN -- works everywhere |
-| `/setgrouppin` | owner/admin, in that group | Set/change THAT group's own PIN |
-| `/rmgrouppin` | owner/admin, in that group | Remove that group's own PIN, falls back to the owner's |
-| `/update` | owner/admin + PIN | Check GitHub for a newer version and install it |
-| `/setbrief <one line>` | owner/admin | Say what this agent looks after (also the 4th item on `/start`) |
-| `/setscope <phrase>` | owner/admin | Change what KIND of assistant it is, not just what it manages |
-| `/setownerscope <text>` | owner, **own DM only** | Extra scope on top of `/setscope`, for the owner alone, in their own DM only -- never a group, even one the owner is speaking in |
-| `/logout` | owner/admin | Clear a sign-in (Gemini or Claude) for a genuinely fresh /start |
-| `/boundaries` | **0 tokens** | What the agent must never do |
 | `/addboundary <rule>` | owner/admin | Add a hard boundary — run it bare for an explanation of what that means |
-| `/rmboundary <n>` | owner/admin + PIN | Remove one |
-| `/snapshots` | **0 tokens** | Snapshots taken before changes |
-| `/cancel` | free | Abort a multi-step form (/start, /addserver) |
-| `/servers` | **0 tokens** | Machines the agent may reach |
-| `/addserver` | owner/admin + PIN | Register a new machine, step by step |
-| `/removeserver <name>` | owner/admin | Unregister one |
-| `/agentstatus` | tiny probe each | Live check: is each tier actually up right now? |
-| `/providers` | **0 tokens** | Which AI tiers are configured, and which are healthy |
-| `/usemodel [name]` | owner/admin | Force a specific tier for this chat (Opus, Gemini Pro-high, ...); `auto` for the default chain |
 | `/addmcp <name> <cmd> [args]` | owner/admin + PIN | Register an MCP server -- run it bare for a ready-to-use, no-install example |
-| `/rmmcp <name>` | owner/admin | Withdraw one (no PIN -- it only reduces capability) |
-| `/mcpservers` | **0 tokens** | What MCP servers are registered |
-| `/gdrivestatus` | **0 tokens** | Is each connected Drive account still working? |
+| `/addserver` | owner/admin + PIN | Register a new machine, step by step |
+| `/adopt` | owner + DM only | Bring pre-existing cron entries under management |
+| `/agentstatus` | tiny probe each | Live check: is each tier actually up right now? |
+| `/boundaries` | **0 tokens** | What the agent must never do |
+| `/cancel` | free | Abort a multi-step form (/start, /addserver) |
+| `/chatid` | free, no auth needed | Reveal the current chat's ID (for group/access setup) |
+| `/forget <n>` | free | Delete one wrong learned fact (numbers from `/learned`) |
 | `/gdrive` (disconnect) | owner/admin | Same card also disconnects an account: revokes access at Google, deletes the local token, deletes nothing in Drive |
 | `/gdrive` | owner/admin, **0 tokens** | Pick (or show) which connected Drive account this room uploads to |
-| `/lang` (or `/language`) | owner/admin, **0 tokens** | Set/show this chat's language for the bot's own fixed replies (`en`/`id`) |
-| `/mode` | **0 tokens** | Read-only right now, or able to change things? |
-| `/unlock [min]` | owner/admin | Open a time-boxed window for real changes (capped at 10 min from a group) |
-| `/lock` | owner/admin | Close that window early |
-| `/registergroup` | admin only | Open this Telegram group to every member, no restart needed |
-| `/unregistergroup` | admin only | Revoke a group's access |
+| `/gdrivefolder` | owner/admin, **0 tokens** | Pin this room's upload folder by browsing to it; `/gdrivefolder off` reverts |
+| `/gdrivestatus` | **0 tokens** | Is each connected Drive account still working? |
+| `/gdrivetarget` | owner/admin, **0 tokens** | Show/set which shared drive (or My Drive) this room's account writes to |
+| `/graduate <name>` | 1 call | Turn the case you *just* solved into a reusable script |
 | `/help` | free | Full in-chat guide -- bilingual, pick EN or ID (or `/help en` / `/help id` directly) |
+| `/lang` (or `/language`) | owner/admin, **0 tokens** | Set/show this chat's language for the bot's own fixed replies (`en`/`id`) |
+| `/learned` | free | What the agent worked out about this environment by itself |
+| `/lock` | owner/admin | Close that window early |
+| `/logout` | owner/admin | Clear a sign-in (Gemini or Claude) for a genuinely fresh /start |
+| `/mcpservers` | **0 tokens** | What MCP servers are registered |
+| `/memory` | free | View current memory contents |
+| `/mode` | **0 tokens** | Read-only right now, or able to change things? |
+| `/new` | free | Reset the active session's conversation history (MEMORY.md untouched) |
+| `/providers` | **0 tokens** | Which AI tiers are configured, and which are healthy |
+| `/registergroup` | admin only | Open this Telegram group to every member, no restart needed |
+| `/remember <fact>` | free | Save a fact permanently, read in every session & every tier |
+| `/removeserver <name>` | owner/admin | Unregister one |
+| `/rmboundary <n>` | owner/admin + PIN | Remove one |
+| `/rmgrouppin` | owner/admin, in that group | Remove that group's own PIN, falls back to the owner's |
+| `/rmmcp <name>` | owner/admin | Withdraw one (no PIN -- it only reduces capability) |
+| `/schedules` | **0 tokens** | Everything that runs on a timer, and what it does |
+| `/servers` | **0 tokens** | Machines the agent may reach |
+| `/session <name>` | free | Create/switch to a named session, for keeping cases separate |
+| `/sessions` | free | List saved sessions |
+| `/setbrief <one line>` | owner/admin | Say what this agent looks after (also the 4th item on `/start`) |
+| `/setchatscope <phrase>` | owner/admin | The role for **this chat only**, overriding `/setscope` here -- one deployment, a different job per room |
+| `/setgrouppin` | owner/admin, in that group | Set/change THAT group's own PIN |
+| `/setownerscope <text>` | owner, **own DM only** | Extra scope on top of `/setscope`, for the owner alone, in their own DM only -- never a group, even one the owner is speaking in |
+| `/setpin` | owner, DM **or group** | Set/change the OWNER's PIN -- works everywhere |
+| `/setscope <phrase>` | owner/admin | Change what KIND of assistant it is, not just what it manages |
+| `/snapshots` | **0 tokens** | Snapshots taken before changes |
+| `/status` | **0 tokens** | Instant status check straight from a script (see `tools/`), no model involved |
+| `/tools` | **0 tokens** | List of "graduated" skills (see below) |
+| `/unlock [min]` | owner/admin | Open a time-boxed window for real changes (capped at 10 min from a group) |
+| `/unregistergroup` | admin only | Revoke a group's access |
+| `/unschedule <name>` | owner + DM only | Remove a scheduled task |
+| `/update` | owner/admin + PIN | Check GitHub for a newer version and install it |
+| `/usemodel [name]` | owner/admin | Force a specific tier for this chat (Opus, Gemini Pro-high, ...); `auto` for the default chain |
 
 ### Graduated skills (`/graduate`)
 
@@ -554,10 +712,10 @@ Either way, once a token is in hand the bot:
 - picks a collision-free name (`gdrive` for the first account, asks for a short
   label like `company` or `clienta` for a second+ one -- becomes `gdrive_company`)
 - registers it with `rclone config create`, never by hand-editing `rclone.conf`
-- checks whether this account already has the shared `iSmart-LA Data` root folder
-  before creating one, so re-authorizing the same account by mistake (a typo'd
-  label, say) can't silently produce a second folder with nothing to notice until
-  files start landing in the wrong one
+- checks whether this account already has this deployment's own
+  `iSmart-LA/<bot name>` root folder before creating one, so re-authorizing the
+  same account by mistake (a typo'd label, say) can't silently produce a second
+  folder with nothing to notice until files start landing in the wrong one
 - **verifies** with a real listing before calling it connected -- reported success
   always means an actual Drive call worked, not that a file was written
 - rolls back cleanly (removes the half-configured remote) on any failure, so a
@@ -590,8 +748,8 @@ replies with a shareable link. Same secret-scan gate as sending a file through
 Telegram — a file containing a credential is refused, not uploaded.
 
 **In a group, uploads land inside that group's own subfolder automatically** —
-`iSmart-LA Data/<group name>/...` — without the model needing to know or add the
-group's name itself. Asking for the shared root instead (a path starting with `/`)
+`iSmart-LA/<bot name>/<group name>/...` — without the model needing to know or
+add the group's name itself. Asking for the shared root instead (a path starting with `/`)
 only works for that group's own admin (or the owner); anyone else's attempt is
 quietly kept inside the group's folder rather than refused outright, the same way
 an untrusted fact from a group is quietly not remembered rather than erroring. This
@@ -600,11 +758,107 @@ company account used across multiple client rooms) — the folder split is a
 convenience default, not a hard permission boundary enforced by Google itself, so
 treat the escape hatch as something only a trusted admin should reach for.
 
-**Known limitation:** rclone's shared default `client_id` (used above, since it
-needs no Google Cloud project of your own) is being retired sometime in 2026 and
-can occasionally hit a shared rate limit under global load (rclone retries with
-backoff automatically). If it stops working, the fix is creating your own
-`client_id` — see rclone's docs linked above.
+#### Dated: rclone's shared OAuth client is being retired in 2026
+
+The zero-setup path above uses rclone's own shared `client_id`. Google has begun
+charging for API requests made through it, and shared usage sits far over the
+free quota, so **rclone is retiring it during 2026** — after a 90-day notice.
+From then on every user needs their own `client_id` / `client_secret`. It can
+also hit a shared rate limit under global load today (rclone retries with
+backoff on its own).
+
+**This is not solved by dropping rclone for the Drive API directly.** Any OAuth
+app needs a client of its own; Google requires one either way. The retirement
+forces exactly the same action whichever library moves the bytes, so rewriting
+would add work without removing the deadline.
+
+What matters here is *which* client refreshes an account. An access token lasts
+about an hour; everything after that is the refresh, and rclone refreshes using
+the `client_id` stored on the remote — with none stored, its shared one.
+
+- **Connected through `/connectgdrive` with your own OAuth client** (the device
+  flow): the client is now recorded on the remote, so these keep working
+  straight through the retirement.
+- **Connected the zero-setup way, or by pasting a token**: these refresh through
+  rclone's shared client and will stop about an hour after it goes.
+  **`/gdrivestatus` names them**, so they are visible while there is still time
+  rather than discovered as "Drive suddenly broke".
+
+Fixing one means setting up your own OAuth client and running `/connectgdrive`
+again for that account. Reconnecting is unavoidable, not laziness in the
+implementation: a refresh token belongs to the client that issued it, so an
+existing one cannot be re-pointed at a new client.
+
+**`/gdrivefolder` pins the upload folder by browsing to it** — the model
+otherwise writes a fresh folder name every turn ("Laporan", then "laporan/2026",
+then "Reports/september"), and nothing ever errors, because rclone happily
+creates whatever it's given. Browsing the real tree once — My Drive or any
+shared drive, folder by folder, then "use this one" — fixes the destination for
+that room. Only the model's filename survives from then on; its directories are
+dropped, and the group-name subfolder isn't added either, since browsing to a
+folder already meant that one, not a child of it. `/gdrivefolder off` reverts to
+the old per-turn behaviour. Delete and move stay fenced inside the pinned
+folder — writing into a place you already keep things in is additive, deleting
+from it is not.
+
+**A shared drive needs its own path, and its own OAuth client.** rclone models a
+shared drive as a different root, not a longer path — no destination typed as
+"the shared drive X" can reach one. `/gdrivetarget` shows where a room's account
+currently writes, lists the shared drives it can see, and points it at one (or
+back at My Drive with `/gdrivetarget mydrive`); `/gdrive` picks *which* account,
+this picks *where inside it*. And because the `drive.file` scope the
+zero-setup and device-flow paths issue can only ever see files the bot itself
+created — never a shared drive somebody else made — reaching one needs the full
+`drive` scope, which only `/connectgdrive manual` can request. That path also
+needs a **second, different kind of OAuth client**: the device flow's "TV and
+Limited Input devices" client cannot do the loopback redirect `rclone
+authorize` uses, so `/connectgdrive setupclient desktop` stores a second client
+in the same Google Cloud project, and the manual instructions attach it
+automatically once it exists.
+
+**Each deployment gets its own root, `iSmart-LA/<bot name>`, not one shared
+`iSmart-LA Data`.** Two bots on one host sharing a connected Google account —
+a real setup once `SERVICE_NAME` makes multiple deployments easy — used to
+write into the *same* root, told apart only by each room's own subfolder,
+which collides outright the moment both bots ever serve a room with the same
+name. An account that still has the old flat folder is migrated
+automatically, once, the next time the bot starts: the whole tree — every
+room's subfolder, anything organized in there by hand — moves in a single
+`rclone moveto`, never recreated file by file.
+
+**The `/gdrive` picker shows the account's own email, not the rclone remote
+name.** `gdrive`, `gdrive_company` — labels the *operator* chose when
+connecting each account — meant nothing to whoever was tapping the button in
+a group chat. Looked up once, right after `/connectgdrive` succeeds, straight
+from the Drive API (`about?fields=user`, the same call `rclone about` makes
+internally, just asked for identity instead of quota); any account connected
+before this shipped gets the same lookup the first time `/gdrive` renders it,
+in the background, without delaying the reply. Falls back to the plain
+remote name if the lookup can't complete — cosmetic only, never load-bearing.
+
+### OPNsense (optional)
+
+Lets the agent query and change an OPNsense firewall, through `tools/opn` —
+one key, since OPNsense grants privileges per *page* rather than per verb, so a
+"read-only" key would still cover most of what a "write" key does; a real
+boundary needs a wrapper, not a second credential.
+
+- **Reads are ungated.** Most of what a firewall gets asked is a read, and
+  gating those is friction with nothing behind it.
+- **Writes require `/unlock` to be open** — checked against the exact file
+  `unlock_write_mode()` writes, expiry included, not a copy of the rule. The
+  refusal names `/unlock` and says reads still work, so nobody opens the
+  window merely to look.
+- **No write without a rollback point first.** The running config is
+  downloaded before the first change of each window; if that download fails,
+  the change does not happen either. Paired with OPNsense's own configuration
+  history, a bad change is one revert away.
+- Raises the on-demand VPN itself when the firewall sits behind one, since a
+  plain `curl` never goes through the `ssh` `ProxyCommand` an interactive
+  session would.
+
+The brief only mentions OPNsense where the credentials for it actually exist,
+so a deployment without them is never offered a tool it cannot use.
 
 ### MCP servers (optional)
 
@@ -909,6 +1163,7 @@ runaway background cost.
 ```
 lite_agent.py              the bot itself
 install.sh                 interactive installer
+newagent.sh                provision an ADDITIONAL deployment (own user + service)
 bootstrap.py               generates SOUL.md / GEMINI.md from a few questions
 requirements.txt
 .env.example                every setting, documented
@@ -917,6 +1172,7 @@ GEMINI.md.template          same, for agy (same content, different tool names)
 tools/
   list_tools.py              prints the graduated-skill registry
   registry.json              starts empty; /graduate appends to it
+  opn                        OPNsense API wrapper, writes tied to /unlock
 examples/proxmox/           filled-in reference against a real Proxmox VE cluster
   SOUL.md.example
   GEMINI.md.example

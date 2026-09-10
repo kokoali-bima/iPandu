@@ -34,6 +34,9 @@ SRC = sys.argv[1]
 scratch = Path(tempfile.mkdtemp(prefix="isla_bootstrap_t_"))
 atexit.register(_shutil.rmtree, str(scratch), ignore_errors=True)
 os.environ["HOME"] = str(scratch)
+# Path.home() ignores HOME on Windows -- USERPROFILE is what it reads,
+# so a suite setting only HOME silently tests the real home there.
+os.environ["USERPROFILE"] = str(scratch)
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "t")
 os.environ.setdefault("ALLOWED_USER_IDS", "111")
 os.environ["ALLOWED_GROUP_IDS"] = ""
@@ -84,8 +87,19 @@ check("a working bootstrap reports success", ok and "Linux" in detail)
 
 # --- the password must not be on disk, only in the environment ------------
 helper = seen.get("helper_text", "")
-check("the askpass helper exists and is executable by nobody else "
-      f"(mode {seen.get('helper_mode')})", seen.get("helper_mode") == "700")
+# The bot runs on Linux, and there the mode is the whole point: a helper any
+# local user can read is a helper any local user can replace. Windows has no
+# POSIX permission bits at all -- os.chmod there only toggles read-only -- so
+# asserting 700 on a dev laptop tests the OS, not us. Keep the real check where
+# it means something, and on Windows check that the code still ASKS for 0o700,
+# which is the part a refactor could quietly drop.
+if os.name == "posix":
+    check("the askpass helper exists and is executable by nobody else "
+          f"(mode {seen.get('helper_mode')})", seen.get("helper_mode") == "700")
+else:
+    check("the askpass helper is chmod 0o700 by the code "
+          "(mode bits are not enforceable on this OS)",
+          "helper.chmod(0o700)" in Path(SRC).read_text(encoding="utf-8"))
 check("the helper contains NO password -- only a variable name",
       PW not in helper and "ISLA_SSH_PW" in helper)
 check("the password is handed over through the environment",
@@ -180,6 +194,27 @@ check("the state is read from sshd itself, not from the config file",
       '"sshd -T"' in src2)
 check("the advice only appears when the host really still allows passwords",
       "if still_open:" in src2)
+
+# --- exempting a host from the advice, a HARD boundary ----------------------
+# A decision already made and final (see CLAUDE.md's "Keputusan tetap": a
+# production box whose dev team depends on password SSH staying open) must
+# not get relitigated by a bot nagging about it every time that host is
+# re-registered. Advice-only, so nothing is at stake but the noise -- but
+# noise is exactly how a REAL warning elsewhere gets tuned out too.
+check("SSH_HARDEN_EXEMPT_HOSTS is empty when unset (nothing in this test's env)",
+      mod.SSH_HARDEN_EXEMPT_HOSTS == set())
+check("...and parses comma-separated, case-insensitive, same shape as "
+      "ALLOWED_GROUP_IDS -- not a one-off pattern",
+      {h.strip().lower() for h in "SrvBJ3, 10.0.0.5 ,".split(",") if h.strip()}
+      == {"srvbj3", "10.0.0.5"})
+
+src3 = Path(SRC).read_text(encoding="utf-8")
+check("an exempt host skips the sshd check entirely, not just the message",
+      'data["host"].lower() in SSH_HARDEN_EXEMPT_HOSTS' in src3)
+gate2 = src3.index('data["host"].lower() in SSH_HARDEN_EXEMPT_HOSTS')
+check("...checked BEFORE password_auth_state ever runs, so an exempt host "
+      "costs no SSH round-trip either",
+      gate2 < src3.index('password_auth_state, data["host"]'))
 
 failed = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed")

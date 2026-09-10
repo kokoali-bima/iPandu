@@ -108,16 +108,39 @@ else:
     ok_tag, _ = git("rev-parse", "--verify", f"refs/tags/v{declared}")
 
     notes_are_committed = bool(declared) and committed_declared == declared
-    check(f"release notes for v{declared} are tagged, or not yet committed "
-          f"(committed={notes_are_committed}, tag={ok_tag})",
-          ok_tag or not notes_are_committed)
+    ok_branch, branch_name = git("rev-parse", "--abbrev-ref", "HEAD")
+    on_master = ok_branch and branch_name.strip() == "master"
+    # A release commit needs its tag -- but only once it is actually ON
+    # master. A PR proposing the same version bump cannot carry the tag
+    # too: the tag has to point at the real master merge commit, which
+    # does not exist until the PR lands. Enforced by branch name, not by
+    # 'HEAD == origin/master', which is false at the one moment this most
+    # needs to fire: locally, on master, about to push the commit that
+    # will BECOME the new tip.
+    check(f"release notes for v{declared} are tagged, or not on master yet "
+          f"(committed={notes_are_committed}, tag={ok_tag}, "
+          f"branch={branch_name.strip() if ok_branch else '?'})",
+          ok_tag or not notes_are_committed or not on_master)
 
     # The bot reports git describe verbatim, so this is literally what an
     # operator sees after /update.
     ok_desc, described = git("describe", "--tags", "--always")
-    if ok_desc and notes_are_committed and ok_tag:
+    ok_head, head_sha = git("rev-parse", "HEAD")
+    ok_tsha, tag_sha = git("rev-list", "-n", "1", f"v{declared}")
+    at_the_release = ok_head and ok_tsha and head_sha == tag_sha
+
+    if ok_desc and notes_are_committed and ok_tag and at_the_release:
         check(f"git describe would announce v{declared} (says: {described})",
               described == f"v{declared}")
+    elif ok_desc and notes_are_committed and ok_tag:
+        # HEAD has moved past the release. That is ordinary development, and
+        # demanding an exact match here is what forced every single commit in
+        # this repository to be a release -- 86 tags across 123 commits, and
+        # not one pull request, because an unreleased commit failed the suite.
+        # What still has to hold is that the work sits ON TOP of the declared
+        # version rather than beside it or behind it.
+        check(f"unreleased work sits on top of v{declared} ({described})",
+              described.startswith(f"v{declared}-"))
     else:
         print(f"INFO  - git describe currently says: {described or '(none)'}")
 
