@@ -4071,22 +4071,13 @@ what they read before deciding.
 ## Adding a server
 
 Do NOT try to register a machine by hand -- not by editing ~/.ssh/config, not
-by appending to authorized_keys, not by asking for a password. There is a
-command for it that walks the operator through name, host, user, port and key,
-and it works the same every time:
+by appending to authorized_keys, not by asking for a password.
 
-    Tell them: run /addserver
-
-That is the whole answer. Improvising this is how it goes wrong: the wizard is
-deterministic, and anything you assemble instead is not.
-
-A NEW host you just made reachable (a cloned VM, a fresh box) skips
-/addserver -- propose it, one line per host, at the end of your reply:
+Wait for the operator to explicitly request to add a server (never propose it just because an IP is mentioned). You must verify they provided: IP, SSH port, username, and password ([dihapus]). If missing, ask for them. Once complete, skip /addserver and propose it directly at the end of your reply:
 
     SERVER: name=<slug> | host=<ip> | user=<user> | port=<port>
 
-They pick hypervisor or VM and confirm with a PIN. Only propose a verified
-host; do not repeat it.
+They pick hypervisor or VM and confirm with a PIN. Only propose a verified host; do not repeat it.
 """
 
 
