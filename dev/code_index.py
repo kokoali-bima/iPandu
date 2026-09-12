@@ -62,7 +62,7 @@ def _summary(node) -> str:
 
 
 def collect(path: Path) -> dict:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text(encoding="utf-8-sig"))
     syms = {}
     order = []
     for node in tree.body:
@@ -102,7 +102,7 @@ def call_graph(path: Path, syms: dict) -> dict:
     function apart. Without it, tracing means reading -- and reading 9,694
     lines is exactly what this whole exercise is trying to avoid.
     """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text(encoding="utf-8-sig"))
     known = set(syms)
     callers = {n: set() for n in known}
     calls = {n: set() for n in known}
