@@ -1,5 +1,79 @@
 # Changelog
 
+## v0.2b.100 -- the native command menu, a tappable /menu, buttons that stop lingering, and three CI failures that had been red since v0.2b.99
+
+Ported from iSmart-LA, adapted where the two repos have already diverged
+(the HTTP Remote MCP / conversational-addserver work here that iSmart-LA
+doesn't have yet):
+
+Asked directly why the itbutler bot shows Telegram's "Menu" button (the one
+that pops up the slash-command list) and the bscloud bot -- running the exact
+same code -- does not. Checked the source before answering: nothing here has
+ever called `set_my_commands()`. Whichever bot has the menu got it from a
+one-time manual step in @BotFather, not from the code, so a brand new
+deployment silently never gets it unless someone remembers. Fixed at
+startup, for both private chats and groups, from a new `_build_bot_commands()`
+that parses the command list straight out of `HELP_TEXT_ID` -- so this menu
+and `/help` describe the same 50-odd commands from one source, not two lists
+someone has to remember to keep in sync.
+
+**New: `/menu`.** A tappable panel (inline buttons, not the native list) for
+the handful of commands reached for most -- Status, Servers, Add Server,
+GDrive, Unlock, Boundaries, Spend, Help. Unlike the native menu it works
+identically in a group. Each button replays the REAL `/command` handler
+(`cmd_status`, `cmd_servers`, ...), not a second description of what it
+does, so a tap can never answer differently than typing the command would.
+
+**Fixed along the way, and it turned out to be the bigger find: inline
+keyboards were never actually removed after the flow behind them finished.**
+`_safe_edit()`, used by nearly every button-driven reply in this file
+(the PIN keypad included), left the OLD keyboard attached whenever the
+caller didn't pass a new `reply_markup` -- which every *terminal* message
+here does (PIN success, `/update` done, a Drive picker resolved). The
+instinct was to pass `reply_markup=None` to clear it; checked against the
+installed library first and that would have changed nothing --
+`Bot._post()` drops every `None`-valued field before the request goes out
+("Telegram doesn't handle them well"), so an explicit `None` and never
+passing it at all are identical on the wire. The fix is a real *empty*
+`InlineKeyboardMarkup([])`, which Telegram does act on. `_safe_edit()` now
+defaults to it whenever the caller omits `reply_markup` -- so a PIN keypad
+(and every other callback-driven button in the bot) disappears the moment
+its job is done.
+
+Wiring the eight `/menu` targets to also be reachable from a button tap
+surfaced the same class of bug this project has fixed before at its root:
+all eight still called `update.message.reply_text(...)` directly, which is
+`None` on a callback update. Switched to `_msg(update)`; `test_reply_target.py`
+picks up `cmd_menu_button` automatically (it matches its own
+`cmd_*...button` root pattern) and confirms nothing reachable from it still
+touches `update.message` directly.
+
+**Three failures found already red in CI, unrelated to the above, fixed
+while getting this green (all three had been failing since at least
+v0.2b.99, on every push, unnoticed):**
+- `test_py_compat.py` -- `lite_agent.py` carries a UTF-8 BOM; `ast.parse()`
+  on a plain-utf-8-decoded string chokes on the leading U+FEFF and the test's
+  own SyntaxError-counts-as-a-hit logic (there to catch pre-3.12 syntax,
+  correctly) flagged it as a false pre-3.12 incompatibility. Same root cause
+  as the `code_index.py` BOM fix earlier this cycle -- the BOM itself is
+  harmless to Python running the file directly, only to tools that
+  `read_text()` it and pass the string to `ast.parse()`. Stripped the BOM
+  from `lite_agent.py`.
+- `test_capabilities_brief.py` -- `CAPABILITIES_BRIEF` had grown to ~884
+  tokens against an 800-token ceiling (the MCP-server section added this
+  cycle pushed it over). Trimmed wording across several sections (server
+  registration, the write-mode explanation, media duration/audio notes) --
+  same information, ~780 tokens, verified by re-measuring rather than
+  guessing at the cut.
+- `test_mcp_commands.py` -- the bare `/addmcp` usage text lost its "stdlib
+  only, no pip/npx install, read-only, locked to one folder" description of
+  the built-in example when the message was restructured to also document
+  the new HTTP Remote MCP path. Restored it into the stdio half of the
+  combined usage text.
+
+**1691/1691, 69 suites** (new: `test_menu.py`, 29 checks; `test_safe_edit.py`
+gained 2 more locking the empty-keyboard default in place).
+
 ## v0.2b.99 -- arm64 hosts can actually finish setup now
 
 Asked directly: can this run on an arm64 VM? Checked instead of guessed, and

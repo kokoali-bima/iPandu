@@ -55,9 +55,11 @@ class FakeQuery:
     def __init__(self, boom=None):
         self.boom = boom
         self.calls: list[str] = []
+        self.kwargs: list[dict] = []
 
     async def edit_message_text(self, text, **kw):
         self.calls.append(text)
+        self.kwargs.append(kw)
         if self.boom:
             raise self.boom
 
@@ -89,6 +91,27 @@ async def helper_cases():
     await mod._safe_edit(q, "ok", parse_mode="HTML")
     check("kwargs (parse_mode, reply_markup, ...) still pass through unchanged",
           q.calls == ["ok"])
+
+    # 2026-09-12: a PIN keypad (and every other button-driven "done" message
+    # -- /update, the Drive picker, MCP registration) left its own keyboard
+    # attached forever, because reply_markup=None is dropped by Bot._post()
+    # before the request goes out ("Telegram doesn't handle them well") --
+    # identical, on the wire, to never passing it at all. The fix is not
+    # "pass None", it is a real empty keyboard, which IS a value Telegram
+    # acts on.
+    q = FakeQuery()
+    await mod._safe_edit(q, "done")
+    markup = q.kwargs[0].get("reply_markup")
+    check("omitting reply_markup clears the keyboard (a real empty "
+          "InlineKeyboardMarkup, not None -- None is silently dropped and "
+          "changes nothing)",
+          isinstance(markup, mod.InlineKeyboardMarkup) and markup.inline_keyboard == ())
+
+    q = FakeQuery()
+    kb = mod.InlineKeyboardMarkup([[mod.InlineKeyboardButton("x", callback_data="x")]])
+    await mod._safe_edit(q, "still choosing", reply_markup=kb)
+    check("an explicit reply_markup is never overridden by that default",
+          q.kwargs[0].get("reply_markup") is kb)
 
 
 asyncio.run(helper_cases())

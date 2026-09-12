@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # ------------------------------------------------------------------------------
 # iPandu -- Copyright (c) 2026 Infrasoft.cloud & BSCloud.id Team.
 # See LICENSE. Any deployment or redistribution of this software must retain
@@ -75,7 +75,14 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram.request import HTTPXRequest
 
@@ -4126,17 +4133,16 @@ in AV1 became 67MB re-encoded to H.264 -- bigger than the source and over the
   ffmpeg -y -ss <start> -i in.mp4 -t 10 -c:v libx264 -preset veryfast -crf 26 \\
          -c:a aac -b:a 128k -movflags +faststart out.mp4
 
-Keep audio: `-c:a aac`. Dropping the audio stream, or using `-an`, sends a
-silent clip -- the usual complaint about meme clips is that they arrived mute.
-To lay sound over existing video: `-c:v copy -c:a aac -shortest` (under a
-second, no re-encode).
+Keep audio: `-c:a aac`. Dropping it (or `-an`) sends a silent clip -- the usual
+complaint. To lay sound over existing video: `-c:v copy -c:a aac -shortest`
+(under a second, no re-encode).
 
-For a meme or a "potongan"/highlight, about 10 seconds. Never past 30 unless
-asked. Ten seconds is a joke; three minutes is homework. Send the whole thing
-only when someone actually asks for the whole thing.
+For a meme/highlight, about 10 seconds. Never past 30 unless asked -- ten
+seconds is a joke, three minutes is homework. Send the whole thing only when
+actually asked for the whole thing.
 
-Do not try to make a file fit the size limit yourself -- hand over what you
-produced, the bot re-encodes anything oversized and says so.
+Do not resize a file yourself -- hand over what you produced, the bot
+re-encodes anything oversized and says so.
 
 Drive markers, each on its own line, all gated behind the operator's PIN:
 
@@ -4146,41 +4152,40 @@ Drive markers, each on its own line, all gated behind the operator's PIN:
 
 ## Changing things on a server
 
-By default your SSH key is READ-ONLY and a guard on the far side refuses
-anything that writes -- you will see `pve-ro-guard: refused`. That is normal
-and it is not a fault to work around. Do not retry it, do not look for another
-command that might slip past, and do not tell the operator their key is broken.
+Your SSH key is READ-ONLY by default; a guard on the far side refuses anything
+that writes (`pve-ro-guard: refused`). That is normal, not a fault to work
+around -- do not retry it or claim their key is broken.
 
 Ask for access instead, on its own line:
 
     NEEDS_WRITE: restart VM 104
 
-The bot turns that into a PIN prompt. Once the operator approves, the same
-commands work. Say what you intend to change, in a few words -- that line is
-what they read before deciding.
+The bot turns that into a PIN prompt; once approved, the same commands work.
+Say what you intend to change in a few words -- that is what they read before
+deciding.
 
 ## Adding a server
 
 Do NOT try to register a machine by hand -- not by editing ~/.ssh/config, not
 by appending to authorized_keys, not by asking for a password.
 
-Wait for the operator to explicitly request to add a server (never propose it just because an IP is mentioned). You must verify they provided: IP, SSH port, username, and password ([dihapus]). If missing, ask for them. Once complete, skip /addserver and propose it directly at the end of your reply:
+Wait for an explicit request (never just because an IP is mentioned). Verify IP, SSH port, username and password are all given -- ask if not. Then skip /addserver and propose it directly at the end of your reply:
 
     SERVER: name=<slug> | host=<ip> | user=<user> | port=<port>
 
-They pick hypervisor or VM and confirm with a PIN. Only propose a verified host; do not repeat it.
+They pick hypervisor or VM and confirm with a PIN. Propose a verified host once; do not repeat it.
 
 ## Adding an MCP Server
 
-To register an MCP server (like Lovable, GitHub, Codex), do NOT edit any config files or run `claude mcp add` yourself! The system requires an interactive OAuth flow in Telegram. Wait for the operator's request, then propose it directly at the end of your reply:
+Do NOT edit config files or run `claude mcp add` yourself -- connecting one needs an interactive OAuth flow in Telegram. Wait for an explicit request, then propose it at the end of your reply:
 
     MCP: name=<slug> | url=<url>
 
-For local stdio MCPs, use:
+Local stdio MCP:
 
     MCP: name=<slug> | command=<cmd> | args=<arg1 arg2...>
 
-The system will automatically intercept this and prompt the user to securely connect it.
+The bot intercepts this and walks the operator through connecting it securely.
 """
 
 
@@ -5000,7 +5005,20 @@ async def _safe_edit(query, text, **kwargs) -> None:
     produce that exact edit twice, and on 2026-09-08 it crashed cmd_update_button
     as an unhandled error mid-/update. Only that specific, information-free
     rejection is swallowed -- a message or chat that is genuinely gone is a real
-    problem and still raises."""
+    problem and still raises.
+
+    Defaults to an EMPTY keyboard when the caller doesn't pass reply_markup --
+    not because Telegram assumes that, but because it does the opposite: if
+    reply_markup is left out of the call entirely, Bot._post() drops it (it
+    drops every None-valued field before the request goes out, since
+    "Telegram doesn't handle them well"), so the OLD keyboard silently stays
+    attached forever. Every caller that finishes a callback flow here --
+    PIN success, /update done, a Drive picker resolved -- was leaving its
+    button(s) stuck on the message. Nothing here calls it wanting the old
+    keyboard kept BY OMISSION: every place that redraws one (the PIN keypad
+    mid-entry, a wizard's next step) already passes its own reply_markup
+    explicitly, which simply overrides this default."""
+    kwargs.setdefault("reply_markup", InlineKeyboardMarkup([]))
     try:
         await query.edit_message_text(text, **kwargs)
     except BadRequest as exc:
@@ -5913,7 +5931,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     lang = _chat_lang(update)
     if not SNAPSHOT_SCRIPT.exists():
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             f"⚠️ Collector not installed: {SNAPSHOT_SCRIPT}",
             f"⚠️ Collector belum terpasang: {SNAPSHOT_SCRIPT}",
         ))
@@ -5924,10 +5942,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
-        await update.message.reply_text(_t(lang, "⚠️ Collector timeout (>120s).", "⚠️ Collector timeout (>120 detik)."))
+        await _msg(update).reply_text(_t(lang, "⚠️ Collector timeout (>120s).", "⚠️ Collector timeout (>120 detik)."))
         return
     if proc.returncode != 0:
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             f"⚠️ Collector failed: {proc.stderr[-500:]}",
             f"⚠️ Collector gagal: {proc.stderr[-500:]}",
         ))
@@ -7537,7 +7555,7 @@ async def cmd_spend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     rows = _ledger_read(days)
     if not rows:
-        return await update.message.reply_text(_t(lang,
+        return await _msg(update).reply_text(_t(lang,
             f"\U0001f4b8 No turns recorded in the last {days} day(s).\n\n"
             "<i>The ledger starts filling from the first turn after this version "
             "was installed -- it cannot show history from before it existed.</i>",
@@ -7596,7 +7614,7 @@ async def cmd_spend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "<i>0 model tokens -- read from the ledger, not asked to a model.</i>",
         "<i>0 token model -- dibaca dari ledger, bukan ditanyakan ke model.</i>"))
     logger.info("spend command served (0 model tokens, days=%d)", days)
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await _msg(update).reply_text("\n".join(lines), parse_mode="HTML")
 
 
 # MCP is a wire protocol (JSON-RPC over stdio), not tied to any language --
@@ -7663,7 +7681,8 @@ async def cmd_addmcp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "/addmcp lovable-team     --url https://mcp.lovable.dev\n"
             "/addmcp github           --url https://mcp.github.com\n"
             "/addmcp codex            --url https://mcp.openai.com</pre>\n"
-            "<b>Stdio example (local, no login):</b>\n"
+            "<b>Stdio example (local, no login)</b> -- stdlib only, no pip/npx "
+            "install, read-only, locked to one folder, costs nothing to run:\n"
             f"<pre>/addmcp reports {_tg_escape(_MCP_EXAMPLE)}</pre>\n"
             f"Currently registered: {existing}",
             "<b>Penggunaan:</b>\n"
@@ -7674,7 +7693,8 @@ async def cmd_addmcp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "/addmcp lovable-team     --url https://mcp.lovable.dev\n"
             "/addmcp github           --url https://mcp.github.com\n"
             "/addmcp codex            --url https://mcp.openai.com</pre>\n"
-            "<b>Contoh Stdio (lokal, tanpa login):</b>\n"
+            "<b>Contoh Stdio (lokal, tanpa login)</b> -- cuma stdlib, tidak perlu "
+            "install pip/npx, read-only, terkunci ke satu folder, tidak ada biaya jalan:\n"
             f"<pre>/addmcp reports {_tg_escape(_MCP_EXAMPLE)}</pre>\n"
             f"Terdaftar sekarang: {existing}",
         ), parse_mode="HTML")
@@ -8135,6 +8155,7 @@ Every reply ends with a "— by ..." tag. If it's ever NOT "{TIERS[0]['label']}"
 /logout — clear a sign-in (Gemini or Claude) so the next /start is a genuinely fresh one
 /mcpservers — what MCP servers are registered (0 tokens)
 /memory — view memory: this chat's own facts, plus the shared base
+/menu — tappable panel for the commands used most (0 tokens) -- works in groups too
 /mode — read-only right now, or able to make changes? (0 tokens)
 /new — restart the ACTIVE session from scratch (conversation history reset, MEMORY.md untouched)
 /providers — which AI tiers are configured and which are healthy (0 tokens)
@@ -8210,6 +8231,7 @@ Setiap balasan diakhiri tanda "— by ...". Kalau tandanya BUKAN "{TIERS[0]['lab
 /logout — hapus satu sign-in (Gemini atau Claude) supaya /start berikutnya benar-benar baru
 /mcpservers — server MCP apa saja yang terdaftar (0 token)
 /memory — lihat memori: fakta milik chat ini, plus yang dipakai bersama
+/menu — panel tombol untuk perintah yang paling sering dipakai (NOL token) -- jalan di grup juga
 /mode — agent lagi read-only atau boleh mengubah? (NOL token)
 /new — mulai ulang sesi AKTIF dari nol (riwayat percakapan direset, MEMORY.md tetap ada)
 /providers — tingkat AI mana saja yang dipakai dan mana yang sehat (NOL token)
@@ -8264,6 +8286,43 @@ _HELP_LANG_KEYBOARD = InlineKeyboardMarkup(
 _HELP_LANG_PROMPT = "Pilih bahasa / Choose a language:"
 
 
+# One line per documented command in HELP_TEXT_ID, e.g.
+# "/addboundary <aturan> — tambah aturan yang TIDAK BOLEH dilanggar ..."
+# -- captures the bare command word (no arguments) and everything after the
+# first " -- " as its description.
+_HELP_COMMAND_LINE_RE = re.compile(r"^/([a-zA-Z][a-zA-Z0-9_]*)\S*(?:\s+\S.*?)?\s+—\s+(.+)$")
+
+# Telegram's own ceiling for a BotCommand description (BOT_COMMAND_DESCRIPTION
+# length, per Bot API). Truncated rather than rejected outright -- a slightly
+# clipped description in the "/" menu is a much smaller problem than
+# set_my_commands failing wholesale and the menu staying empty.
+_BOT_COMMAND_DESC_LIMIT = 256
+
+
+def _build_bot_commands() -> list[BotCommand]:
+    """The Telegram "/" command menu, parsed straight out of HELP_TEXT_ID
+    rather than kept as a second, separate list.
+
+    /help and the native command menu describing two different things for
+    the same 40+ commands is exactly the kind of drift this project has
+    already been bitten by more than once (a brief, a help text, a template
+    that says something the code stopped doing) -- one source here, so a
+    command added to /help is never invisible to this menu, and vice versa.
+    """
+    commands: list[BotCommand] = []
+    seen: set[str] = set()
+    for line in HELP_TEXT_ID.splitlines():
+        m = _HELP_COMMAND_LINE_RE.match(line.strip())
+        if not m:
+            continue
+        name, desc = m.group(1).lower(), m.group(2).strip()
+        if name in seen:
+            continue
+        seen.add(name)
+        commands.append(BotCommand(name, desc[:_BOT_COMMAND_DESC_LIMIT]))
+    return commands
+
+
 TELEGRAM_MESSAGE_LIMIT = 4096
 
 
@@ -8302,13 +8361,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     arg = (context.args[0].lower() if context.args else "").strip()
     if arg in ("id", "indonesia", "indonesian"):
         for chunk in _split_for_telegram(HELP_TEXT_ID):
-            await update.message.reply_text(chunk, parse_mode="Markdown")
+            await _msg(update).reply_text(chunk, parse_mode="Markdown")
         return
     if arg in ("en", "english"):
         for chunk in _split_for_telegram(HELP_TEXT_EN):
-            await update.message.reply_text(chunk, parse_mode="Markdown")
+            await _msg(update).reply_text(chunk, parse_mode="Markdown")
         return
-    await update.message.reply_text(_HELP_LANG_PROMPT, reply_markup=_HELP_LANG_KEYBOARD)
+    await _msg(update).reply_text(_HELP_LANG_PROMPT, reply_markup=_HELP_LANG_KEYBOARD)
 
 
 async def cmd_help_lang_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -8488,13 +8547,13 @@ async def cmd_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             getattr(update.effective_chat, "id", "?"),
             getattr(update.effective_user, "id", "?"),
         )
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             "🔒 Bot owner, or a registered group's own admin.",
             "🔒 Pemilik bot, atau admin dari grup yang sudah terdaftar.",
         ))
         return
     if not _keys_configured():
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             "⚠️ Write-mode keys are not set up, so there is nothing to unlock — the agent "
             f"is using whatever `{SSH_ACTIVE_KEY.name}` already points at.\n\n"
             "See README (\"Write mode\") to enable the two-key setup.",
@@ -8542,7 +8601,7 @@ async def cmd_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         try:
             minutes = int(context.args[0])
         except ValueError:
-            await update.message.reply_text(_t(lang,
+            await _msg(update).reply_text(_t(lang,
                 f"Usage: /unlock [minutes, max {cap} here]",
                 f"Pakai: /unlock [menit, maks {cap} di sini]",
             ))
@@ -9300,7 +9359,7 @@ async def cmd_gdrive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     lang = _chat_lang(update)
     accounts = _list_gdrive_accounts()
     if not accounts:
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             "\U0001f4c1 No Google Drive account is connected yet.\n\n"
             "Run /connectgdrive to add one -- it is a link to open and a "
             "short code to type, no terminal needed.",
@@ -9359,7 +9418,7 @@ async def cmd_gdrive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "Butuh akun lain (belum ada di atas)? Tetap langkah sekali-jalan langsung "
         "di host -- minta operator hubungkan satu.",
     ))
-    await update.message.reply_text(
+    await _msg(update).reply_text(
         "\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows)
     )
 
@@ -11786,7 +11845,7 @@ async def cmd_addserver(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     lang = _chat_lang(update)
     if not _is_owner(update) and not await _is_group_admin(update, context):
-        await update.message.reply_text(_t(lang, "🔒 Bot owner or a group admin only.",
+        await _msg(update).reply_text(_t(lang, "🔒 Bot owner or a group admin only.",
                                               "🔒 Cuma pemilik bot atau admin grup."))
         return
     if pin_is_set(update.effective_chat.id):
@@ -11794,7 +11853,7 @@ async def cmd_addserver(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         # Nothing to verify against yet. Say so plainly instead of pretending
         # a gate exists -- and nudge, because this is exactly what it protects.
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             "⚠️ No PIN is set, so this isn't protected yet. Set one with /setpin "
             "when you're done — it's what stops a stolen Telegram session from "
             "adding a server nobody noticed.",
@@ -12377,7 +12436,7 @@ async def cmd_servers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     lang = _chat_lang(update)
     items = _read_servers()
     if not items:
-        return await update.message.reply_text(_t(lang,
+        return await _msg(update).reply_text(_t(lang,
             "🖥 No servers registered.\n\nAdd one with /addserver.",
             "🖥 Belum ada server terdaftar.\n\nTambahkan lewat /addserver.",
         ))
@@ -12439,7 +12498,7 @@ async def cmd_boundaries(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     lang = _chat_lang(update)
     items = read_boundaries()
     if not items:
-        return await update.message.reply_text(_t(lang,
+        return await _msg(update).reply_text(_t(lang,
             "🚧 <b>No hard boundaries set.</b>\n\n"
             "A hard boundary is something the agent must <b>never</b> do on its own, "
             "however it is asked. It has real shell and SSH access, so this is the short "
@@ -12470,6 +12529,70 @@ async def cmd_boundaries(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "\n<i>Tambah: /addboundary &lt;aturan&gt;   Hapus: /rmboundary &lt;nomor&gt;</i>",
     ))
     await _reply_chunked(update, "\n".join(lines), already_html=True)
+
+
+# (action, button label) -- deliberately the handful of zero/low-token,
+# frequently-used commands, not all 50+: a menu that lists everything is not
+# faster to use than /help. Unlike the native "/" command menu (BotFather- or
+# set_my_commands-driven, plain text, private-chat habit for most users),
+# these are ordinary inline buttons under our own control, so they render the
+# same and work the same in a group as in a DM.
+_MAIN_MENU_BUTTONS: list[tuple[str, str]] = [
+    ("status", "\U0001f4ca Status"),
+    ("servers", "\U0001f5a5 Servers"),
+    ("addserver", "➕ Add Server"),
+    ("gdrive", "☁️ GDrive"),
+    ("unlock", "\U0001f513 Unlock"),
+    ("boundaries", "\U0001f6a7 Boundaries"),
+    ("spend", "\U0001f4b8 Spend"),
+    ("help", "❓ Help"),
+]
+
+
+def _menu_keyboard() -> InlineKeyboardMarkup:
+    rows, row = [], []
+    for action, label in _MAIN_MENU_BUTTONS:
+        row.append(InlineKeyboardButton(label, callback_data=f"menu:{action}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+
+async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A tappable panel for the functions reached for most often. Stays on
+    screen after a tap (deliberately -- unlike a PIN keypad, there is nothing
+    here a second tap could do harm by re-running), so one /menu can drive
+    several lookups in a row without retyping it."""
+    if not _authorized(update):
+        return
+    await _msg(update).reply_text(
+        _t(_chat_lang(update), "\U0001f4cb Main menu:", "\U0001f4cb Menu utama:"),
+        reply_markup=_menu_keyboard(),
+    )
+
+
+async def cmd_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Replays the tapped button's real /command handler -- the exact same
+    function, not a second copy of what it does -- so a menu button can never
+    answer differently than typing the command would. Resolved lazily (by
+    name, not a dict built at import time) because every target here is
+    defined earlier in this same module load; a dict built at the top of the
+    file could not yet see them."""
+    query = update.callback_query
+    action = query.data.split(":", 1)[1]
+    handler = {
+        "status": cmd_status, "servers": cmd_servers, "addserver": cmd_addserver,
+        "gdrive": cmd_gdrive, "unlock": cmd_unlock, "boundaries": cmd_boundaries,
+        "spend": cmd_spend, "help": cmd_help,
+    }.get(action)
+    if handler is None:
+        await _safe_answer(query)
+        return
+    await _safe_answer(query)
+    await handler(update, context)
 
 
 async def cmd_addboundary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -13639,6 +13762,24 @@ def main() -> None:
 
     async def _announce_update(application) -> None:
         """One shot, on startup, only if an update just restarted us."""
+        # The Telegram "Menu" button (the one that lists slash-commands) was
+        # found to be present on one deployment (itbutler) and absent on
+        # another (bscloud) running the exact same code -- because nothing
+        # here had ever called set_my_commands(). Whichever bot had it was
+        # set up once, by hand, via @BotFather; a new bot token never gets it
+        # unless someone remembers that manual step. Registered here instead,
+        # every startup, for both scopes so it works in groups too -- one
+        # deployment can no longer differ from another by an operator's
+        # memory. _build_bot_commands() reads HELP_TEXT_ID directly, so this
+        # menu and /help can't drift into describing two different things.
+        try:
+            commands = _build_bot_commands()
+            await application.bot.set_my_commands(
+                commands, scope=BotCommandScopeAllPrivateChats())
+            await application.bot.set_my_commands(
+                commands, scope=BotCommandScopeAllGroupChats())
+        except Exception:
+            logger.warning("could not register the Telegram command menu", exc_info=True)
         # Reaching post_init is the proof the boot guard is waiting for: the
         # token was accepted and the application initialised. Disarm BEFORE the
         # early return below -- a start with nothing to announce is still a
@@ -13753,6 +13894,8 @@ def main() -> None:
     app.add_handler(CommandHandler("rmgrouppin", cmd_rmgrouppin))
     app.add_handler(CallbackQueryHandler(cmd_pin_key, pattern="^pin:"))
     app.add_handler(CommandHandler("boundaries", cmd_boundaries))
+    app.add_handler(CommandHandler("menu", cmd_menu))
+    app.add_handler(CallbackQueryHandler(cmd_menu_button, pattern="^menu:"))
     app.add_handler(CommandHandler("update", cmd_update))
     app.add_handler(CallbackQueryHandler(cmd_update_button, pattern="^upd:"))
     app.add_handler(CommandHandler("setbrief", cmd_setbrief))
