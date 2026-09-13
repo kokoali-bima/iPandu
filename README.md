@@ -6,7 +6,7 @@
 **Infrastructure monitoring and investigation, at a fraction of a full agent
 framework's token cost.**
 
-[![Status](https://img.shields.io/badge/status-v0.2b.101%20beta-blueviolet)](#why-this-exists)
+[![Status](https://img.shields.io/badge/status-v0.2b.102%20beta-blueviolet)](#why-this-exists)
 [![License](https://img.shields.io/badge/license-proprietary-lightgrey)](#credits)
 [![Python](https://img.shields.io/badge/python-3.10--3.13-blue)](#system-requirements)
 [![Architecture](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-success)](#system-requirements)
@@ -31,7 +31,7 @@ A report doesn't have to stop at the chat: it can land straight in a shared
 [Google Drive](#google-drive-optional) folder too, connected the same explicit way as
 everything else here -- through Telegram, not a config file.
 
-> **Status: v0.2b.101 -- early/beta.** Built and battle-tested against a real production
+> **Status: v0.2b.102 -- early/beta.** Built and battle-tested against a real production
 > Proxmox VE cluster over several days of iteration, including a live-fire test of the
 > unlock/PIN/snapshot flow against real infrastructure. Works well; still has known
 > rough edges (see [Known limitations](#known-limitations)).
@@ -1209,8 +1209,7 @@ systemd/
 
 ## Credits
 
-🚀 **Designed by Koko Ali & Dede**
-💻 **Developed by Infrasoft.cloud & BSCloud.id Team**
+🚀 **Designed by Koko Ali & Team**
 
 Happy smart working! ✨
 

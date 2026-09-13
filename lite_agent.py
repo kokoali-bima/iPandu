@@ -2,8 +2,8 @@
 # ------------------------------------------------------------------------------
 # iPandu -- Copyright (c) 2026 Infrasoft.cloud & BSCloud.id Team.
 # See LICENSE. Any deployment or redistribution of this software must retain
-# the "Designed by Koko Ali & Dede - Developed by Infrasoft.cloud & BSCloud.id
-# Team" credit as it appears in /start and /help below -- do not remove it.
+# the "Designed by Koko Ali & Team" credit as it appears in /start and /help
+# below -- do not remove it.
 # ------------------------------------------------------------------------------
 """
 iPandu (Lite Agent) -- a lightweight Telegram bridge to Claude Code and
@@ -8119,8 +8119,7 @@ def _tier_summary() -> str:
 # from the copyright holder (see LICENSE at the repo root).
 _HELP_CREDITS = (
     "━━━━━━━━━━━━━━━━━━━\n"
-    "\U0001f680 *Designed by Koko Ali & Dede*\n"
-    "\U0001f4bb *Developed by Infrasoft.cloud & BSCloud.id Team*\n\n"
+    "\U0001f680 *Designed by Koko Ali & Team*\n\n"
     "Happy smart working! ✨\U0001f929\U0001f60e"
 )
 

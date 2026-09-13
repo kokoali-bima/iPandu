@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2b.102 -- credits no longer shared with iSmart-LA
+
+iPandu's own thing now, not a mirror: the required attribution (`LICENSE`,
+the file header, `/help`'s footer, README) is "Designed by Koko Ali & Team"
+only. Dropped "& Dede" and the separate "Developed by Infrasoft.cloud &
+BSCloud.id Team" line that iSmart-LA still carries -- iPandu is heading
+toward its own architecture and is no longer tied to iSmart-LA's identity.
+
+1739/1739 across 69 suites (no test asserted the old string, so nothing
+else moved).
+
 ## v0.2b.101 -- an Exit button, and each room can pick its own /menu
 
 Ported from iSmart-LA. Two things asked for directly about the /menu
