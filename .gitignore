@@ -31,9 +31,12 @@ snapshots.json
 setup_state.json
 model_overrides.json
 chat_language.json
+menu_prefs.json
 gdrive_room_accounts.json
 gdrive_oauth_client.json
 gdrive_oauth_client_desktop.json
+mcp_servers.json
+write_mode.json
 .*.service.bak
 /incoming/
 /bin/

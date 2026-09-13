@@ -3087,9 +3087,9 @@ def apply_update() -> tuple[bool, str, str]:
 HARDEN_600 = (
     ".env", "pin.json", "sessions.json", "sessions.json.bak", "spend.jsonl",
     "allowed_groups.json", "servers.json", "schedules.json", "snapshots.json",
-    "setup_state.json", "model_overrides.json", "chat_language.json",
+    "setup_state.json", "model_overrides.json", "chat_language.json", "menu_prefs.json",
     "gdrive_room_accounts.json", "gdrive_oauth_client.json", "mcp_servers.json",
-    "MEMORY.md", "OWNER_SCOPE.md",
+    "write_mode.json", "MEMORY.md", "OWNER_SCOPE.md",
 )
 
 
@@ -5905,7 +5905,7 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     own_path = _chat_memory_file(chat_id)
     own = own_path.read_text().strip() if own_path and own_path.exists() else ""
     if not shared and not own:
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             "Memory is empty. Add facts with /remember <fact>.",
             "Memori masih kosong. Tambah lewat /remember <fakta>.",
         ))
@@ -5960,7 +5960,7 @@ async def cmd_tools(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     lang = _chat_lang(update)
     if not LIST_TOOLS_SCRIPT.exists():
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             f"⚠️ Not installed: {LIST_TOOLS_SCRIPT}",
             f"⚠️ Belum terpasang: {LIST_TOOLS_SCRIPT}",
         ))
@@ -7871,7 +7871,7 @@ async def cmd_mcpservers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     lang = _chat_lang(update)
     servers = read_mcp_servers()
     if not servers:
-        return await update.message.reply_text(_t(lang,
+        return await _msg(update).reply_text(_t(lang,
             "No MCP servers registered. /addmcp to add one -- run it bare for a "
             "ready-to-use example.",
             "Belum ada server MCP terdaftar. /addmcp untuk menambah -- jalankan "
@@ -7893,7 +7893,7 @@ async def cmd_mcpservers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         for n, s in sorted(stdio_svrs.items()):
             cmdline = f"{s.get('command', '?')} {' '.join(s.get('args', []))}".strip()
             lines.append(f"• <b>{_tg_escape(n)}</b> — <code>{_tg_escape(cmdline)}</code>")
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await _msg(update).reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def cmd_setownerscope(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -8155,7 +8155,7 @@ Every reply ends with a "— by ..." tag. If it's ever NOT "{TIERS[0]['label']}"
 /logout — clear a sign-in (Gemini or Claude) so the next /start is a genuinely fresh one
 /mcpservers — what MCP servers are registered (0 tokens)
 /memory — view memory: this chat's own facts, plus the shared base
-/menu — tappable panel for the commands used most (0 tokens) -- works in groups too
+/menu — tappable panel for the commands used most (0 tokens) -- works in groups too; its own "Customize" button lets this room pick which ones show
 /mode — read-only right now, or able to make changes? (0 tokens)
 /new — restart the ACTIVE session from scratch (conversation history reset, MEMORY.md untouched)
 /providers — which AI tiers are configured and which are healthy (0 tokens)
@@ -8231,7 +8231,7 @@ Setiap balasan diakhiri tanda "— by ...". Kalau tandanya BUKAN "{TIERS[0]['lab
 /logout — hapus satu sign-in (Gemini atau Claude) supaya /start berikutnya benar-benar baru
 /mcpservers — server MCP apa saja yang terdaftar (0 token)
 /memory — lihat memori: fakta milik chat ini, plus yang dipakai bersama
-/menu — panel tombol untuk perintah yang paling sering dipakai (NOL token) -- jalan di grup juga
+/menu — panel tombol untuk perintah yang paling sering dipakai (NOL token) -- jalan di grup juga; ada tombol "Customize" untuk atur sendiri tombol mana yang muncul di ruang ini
 /mode — agent lagi read-only atau boleh mengubah? (NOL token)
 /new — mulai ulang sesi AKTIF dari nol (riwayat percakapan direset, MEMORY.md tetap ada)
 /providers — tingkat AI mana saja yang dipakai dan mana yang sehat (NOL token)
@@ -8432,7 +8432,7 @@ async def cmd_learned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     lang = _chat_lang(update)
     facts = _learned_facts()
     if not facts:
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             "The agent hasn't recorded anything about this environment yet.\n\n"
             "Environment knowledge fills itself in as you use it. Safety rules "
             "(hard boundaries) live in the protected zone and never change with it.",
@@ -8785,7 +8785,7 @@ async def cmd_gdrivestatus(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     lang = _chat_lang(update)
     accounts = _list_gdrive_accounts()
     if not accounts:
-        return await update.message.reply_text(_t(lang,
+        return await _msg(update).reply_text(_t(lang,
             "📁 No Google Drive account is connected. /connectgdrive to add one.",
             "📁 Belum ada akun Google Drive terhubung. /connectgdrive untuk menambah."))
     await context.bot.send_chat_action(update.effective_chat.id, "typing")
@@ -8825,7 +8825,7 @@ async def cmd_gdrivestatus(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         lines.append(_t(lang,
             "<i>No OAuth client set up, so /connectgdrive will ask for one first.</i>",
             "<i>Belum ada OAuth client, jadi /connectgdrive akan menanyakannya dulu.</i>"))
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await _msg(update).reply_text("\n".join(lines), parse_mode="HTML")
 
 
 def _gdrive_stored_refresh_token(name: str) -> str:
@@ -10728,7 +10728,7 @@ async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     lang = _chat_lang(update)
     if not _keys_configured():
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             "⚠️ Write-mode keys not configured — the agent uses one fixed SSH key, so it "
             "can change things at any time. See README (\"Write mode\") to gate that.",
             "⚠️ Kunci write-mode belum diatur — agent pakai satu kunci SSH tetap, jadi bisa "
@@ -10738,12 +10738,12 @@ async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     until = write_mode_expires_at()
     if until:
         left = int((until - _dt.datetime.now().timestamp()) / 60) + 1
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             f"🔓 Write mode OPEN — about {left} minute(s) left.",
             f"🔓 Write mode TERBUKA — sisa sekitar {left} menit.",
         ))
     else:
-        await update.message.reply_text(_t(lang,
+        await _msg(update).reply_text(_t(lang,
             "🔒 Read-only. Investigation, audits and reports work normally.\nNeed a change? /unlock [minutes]",
             "🔒 Read-only. Investigasi, audit, dan laporan tetap jalan normal.\nPerlu mengubah sesuatu? /unlock [menit]",
         ))
@@ -12531,33 +12531,108 @@ async def cmd_boundaries(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await _reply_chunked(update, "\n".join(lines), already_html=True)
 
 
-# (action, button label) -- deliberately the handful of zero/low-token,
-# frequently-used commands, not all 50+: a menu that lists everything is not
-# faster to use than /help. Unlike the native "/" command menu (BotFather- or
-# set_my_commands-driven, plain text, private-chat habit for most users),
-# these are ordinary inline buttons under our own control, so they render the
-# same and work the same in a group as in a DM.
-_MAIN_MENU_BUTTONS: list[tuple[str, str]] = [
-    ("status", "\U0001f4ca Status"),
-    ("servers", "\U0001f5a5 Servers"),
-    ("addserver", "➕ Add Server"),
-    ("gdrive", "☁️ GDrive"),
-    ("unlock", "\U0001f513 Unlock"),
-    ("boundaries", "\U0001f6a7 Boundaries"),
-    ("spend", "\U0001f4b8 Spend"),
-    ("help", "❓ Help"),
+# The full pool a room may choose buttons from -- deliberately every
+# zero-or-optional-argument command that answers on its own from a bare tap
+# (nothing here needs a follow-up value typed in first), not the full 50+:
+# a menu offering everything is not faster to use than /help. Kept as labels
+# only; _menu_action_handlers() maps each one to its real function.
+_MENU_CANDIDATE_LABELS: dict[str, str] = {
+    "status": "\U0001f4ca Status",
+    "servers": "\U0001f5a5 Servers",
+    "addserver": "➕ Add Server",
+    "gdrive": "☁️ GDrive",
+    "gdrivestatus": "☁️ GDrive status",
+    "unlock": "\U0001f513 Unlock",
+    "boundaries": "\U0001f6a7 Boundaries",
+    "spend": "\U0001f4b8 Spend",
+    "providers": "\U0001f4e1 Providers",
+    "agentstatus": "\U0001fa7a Agent status",
+    "tools": "\U0001f6e0️ Tools",
+    "mode": "\U0001f512 Mode",
+    "learned": "\U0001f9e0 Learned",
+    "mcpservers": "\U0001f50c MCP servers",
+    "schedules": "⏰ Schedules",
+    "snapshots": "\U0001f4f8 Snapshots",
+    "memory": "\U0001f4dd Memory",
+    "help": "❓ Help",
+}
+
+# The room-picked (or default) SUBSET actually shown, in the order they were
+# picked -- distinct from the pool above, which never changes.
+_MENU_DEFAULT_ACTIONS: list[str] = [
+    "status", "servers", "addserver", "gdrive",
+    "unlock", "boundaries", "spend", "help",
 ]
 
+# Two buttons that are always present and never part of what a room picks --
+# picking your way to a menu with no way back out of it would be a UX bug,
+# not a customization.
+_MENU_ACTION_EXIT = "✖️"
+_MENU_ACTION_CUSTOMIZE = "⚙️"
 
-def _menu_keyboard() -> InlineKeyboardMarkup:
+MENU_PREFS_FILE = BASE_DIR / "menu_prefs.json"  # {chat_id: [action, ...]}
+
+
+def _menu_action_handlers() -> dict:
+    """action -> the real /command function it replays. Rebuilt on every
+    lookup (a handful of dict-literal assignments, not worth caching) rather
+    than once at import time: every name here is resolved from THIS
+    module's own global namespace at call time, the same way the dict
+    literal this replaced already did -- so a test patching cmd_status,
+    say, still reaches the same object a live button tap would."""
+    return {
+        "status": cmd_status, "servers": cmd_servers, "addserver": cmd_addserver,
+        "gdrive": cmd_gdrive, "gdrivestatus": cmd_gdrivestatus, "unlock": cmd_unlock,
+        "boundaries": cmd_boundaries, "spend": cmd_spend, "providers": cmd_providers,
+        "agentstatus": cmd_agentstatus, "tools": cmd_tools, "mode": cmd_mode,
+        "learned": cmd_learned, "mcpservers": cmd_mcpservers, "schedules": cmd_schedules,
+        "snapshots": cmd_snapshots, "memory": cmd_memory, "help": cmd_help,
+    }
+
+
+def _read_menu_prefs() -> dict:
+    if not MENU_PREFS_FILE.exists():
+        return {}
+    try:
+        return json.loads(MENU_PREFS_FILE.read_text())
+    except Exception:
+        logger.warning("menu_prefs.json unreadable -- using the default menu", exc_info=True)
+        return {}
+
+
+def _write_menu_prefs(items: dict) -> None:
+    MENU_PREFS_FILE.write_text(json.dumps(items, indent=2))
+
+
+def _menu_actions_for(chat_id) -> list[str]:
+    """This room's chosen buttons, in the order it picked them -- falling
+    back to the default set if nothing was ever saved, or if everything
+    saved has since stopped existing (a renamed/removed command should
+    degrade to the default menu, not an empty one)."""
+    saved = _read_menu_prefs().get(str(chat_id))
+    if saved:
+        kept = [a for a in saved if a in _MENU_CANDIDATE_LABELS]
+        if kept:
+            return kept
+    return list(_MENU_DEFAULT_ACTIONS)
+
+
+def _menu_keyboard(chat_id) -> InlineKeyboardMarkup:
     rows, row = [], []
-    for action, label in _MAIN_MENU_BUTTONS:
+    for action in _menu_actions_for(chat_id):
+        label = _MENU_CANDIDATE_LABELS.get(action)
+        if not label:
+            continue
         row.append(InlineKeyboardButton(label, callback_data=f"menu:{action}"))
         if len(row) == 2:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
+    rows.append([
+        InlineKeyboardButton(f"{_MENU_ACTION_CUSTOMIZE} Customize", callback_data="menu:customize"),
+        InlineKeyboardButton(f"{_MENU_ACTION_EXIT} Exit", callback_data="menu:exit"),
+    ])
     return InlineKeyboardMarkup(rows)
 
 
@@ -12565,34 +12640,143 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """A tappable panel for the functions reached for most often. Stays on
     screen after a tap (deliberately -- unlike a PIN keypad, there is nothing
     here a second tap could do harm by re-running), so one /menu can drive
-    several lookups in a row without retyping it."""
+    several lookups in a row without retyping it. What buttons show is
+    per-room (see /menu's own "Customize"), not global."""
     if not _authorized(update):
         return
     await _msg(update).reply_text(
         _t(_chat_lang(update), "\U0001f4cb Main menu:", "\U0001f4cb Menu utama:"),
-        reply_markup=_menu_keyboard(),
+        reply_markup=_menu_keyboard(update.effective_chat.id),
     )
+
+
+# In-progress edits, kept in memory only -- like _gdrive_wizard and
+# _pin_sessions, losing one to a restart costs nothing worth persisting for.
+# {chat_id: set(action)}, the WORKING selection until Save writes it out.
+_menu_edit_sessions: dict[int, set] = {}
+
+
+def _menu_editor_keyboard(selected: set) -> InlineKeyboardMarkup:
+    rows, row = [], []
+    for action, label in _MENU_CANDIDATE_LABELS.items():
+        mark = "✅" if action in selected else "⬜"
+        row.append(InlineKeyboardButton(f"{mark} {label}", callback_data=f"menuedit:{action}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([
+        InlineKeyboardButton("\U0001f4be Save", callback_data="menuedit:save"),
+        InlineKeyboardButton("↩️ Reset", callback_data="menuedit:reset"),
+        InlineKeyboardButton("✖️ Cancel", callback_data="menuedit:cancel"),
+    ])
+    return InlineKeyboardMarkup(rows)
 
 
 async def cmd_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Replays the tapped button's real /command handler -- the exact same
     function, not a second copy of what it does -- so a menu button can never
-    answer differently than typing the command would. Resolved lazily (by
-    name, not a dict built at import time) because every target here is
-    defined earlier in this same module load; a dict built at the top of the
-    file could not yet see them."""
+    answer differently than typing the command would."""
     query = update.callback_query
     action = query.data.split(":", 1)[1]
-    handler = {
-        "status": cmd_status, "servers": cmd_servers, "addserver": cmd_addserver,
-        "gdrive": cmd_gdrive, "unlock": cmd_unlock, "boundaries": cmd_boundaries,
-        "spend": cmd_spend, "help": cmd_help,
-    }.get(action)
+    chat_id = update.effective_chat.id
+    lang = _chat_lang(update)
+
+    if action == "exit":
+        await _safe_answer(query)
+        await _safe_edit(query, _t(lang, "\U0001f4cb Menu closed.", "\U0001f4cb Menu ditutup."))
+        return
+
+    if action == "customize":
+        if not await _may_authorize_group_action(update, context):
+            await _safe_answer(query, _t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
+            return
+        await _safe_answer(query)
+        _menu_edit_sessions[chat_id] = set(_menu_actions_for(chat_id))
+        await _safe_edit(query, _t(lang,
+            "⚙️ <b>Customize this room's menu.</b> Tap to toggle, then Save.",
+            "⚙️ <b>Atur menu ruang ini.</b> Tap untuk pilih/batal, lalu Simpan.",
+        ), parse_mode="HTML", reply_markup=_menu_editor_keyboard(_menu_edit_sessions[chat_id]))
+        return
+
+    handler = _menu_action_handlers().get(action)
     if handler is None:
         await _safe_answer(query)
         return
     await _safe_answer(query)
     await handler(update, context)
+
+
+async def cmd_menu_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The customize editor's own buttons -- toggling, saving, resetting,
+    cancelling. Gated the same way opening the editor is: a working
+    selection nobody is allowed to change is not something a stray tap
+    should be able to touch."""
+    query = update.callback_query
+    action = query.data.split(":", 1)[1]
+    chat_id = update.effective_chat.id
+    lang = _chat_lang(update)
+
+    if not await _may_authorize_group_action(update, context):
+        await _safe_answer(query, _t(lang, "Not permitted.", "Tidak diizinkan."), show_alert=True)
+        return
+
+    selected = _menu_edit_sessions.get(chat_id)
+    if selected is None:
+        await _safe_answer(query, _t(lang,
+            "This editor expired -- open it again from /menu.",
+            "Sesi edit ini sudah kedaluwarsa -- buka lagi dari /menu."), show_alert=True)
+        return
+
+    if action == "cancel":
+        _menu_edit_sessions.pop(chat_id, None)
+        await _safe_answer(query)
+        await _safe_edit(query, _t(lang, "\U0001f4cb Main menu:", "\U0001f4cb Menu utama:"),
+                         reply_markup=_menu_keyboard(chat_id))
+        return
+
+    if action == "reset":
+        selected.clear()
+        selected.update(_MENU_DEFAULT_ACTIONS)
+        await _safe_answer(query)
+        await _safe_edit(query, _t(lang,
+            "⚙️ <b>Customize this room's menu.</b> Tap to toggle, then Save.",
+            "⚙️ <b>Atur menu ruang ini.</b> Tap untuk pilih/batal, lalu Simpan.",
+        ), parse_mode="HTML", reply_markup=_menu_editor_keyboard(selected))
+        return
+
+    if action == "save":
+        if not selected:
+            await _safe_answer(query, _t(lang,
+                "Pick at least one command first.",
+                "Pilih setidaknya satu perintah dulu."), show_alert=True)
+            return
+        prefs = _read_menu_prefs()
+        # Saved in the pool's own declared order, not tap order -- so the
+        # layout stays predictable across rooms that picked the same set in
+        # a different sequence of taps.
+        prefs[str(chat_id)] = [a for a in _MENU_CANDIDATE_LABELS if a in selected]
+        _write_menu_prefs(prefs)
+        _menu_edit_sessions.pop(chat_id, None)
+        await _safe_answer(query, _t(lang, "Saved.", "Tersimpan."))
+        await _safe_edit(query, _t(lang, "\U0001f4cb Main menu:", "\U0001f4cb Menu utama:"),
+                         reply_markup=_menu_keyboard(chat_id))
+        return
+
+    if action in _MENU_CANDIDATE_LABELS:
+        if action in selected:
+            selected.discard(action)
+        else:
+            selected.add(action)
+        await _safe_answer(query)
+        await _safe_edit(query, _t(lang,
+            "⚙️ <b>Customize this room's menu.</b> Tap to toggle, then Save.",
+            "⚙️ <b>Atur menu ruang ini.</b> Tap untuk pilih/batal, lalu Simpan.",
+        ), parse_mode="HTML", reply_markup=_menu_editor_keyboard(selected))
+        return
+
+    await _safe_answer(query)
 
 
 async def cmd_addboundary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -12689,7 +12873,7 @@ async def cmd_snapshots(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     lang = _chat_lang(update)
     items = read_snapshots()
     if not items:
-        return await update.message.reply_text(_t(lang,
+        return await _msg(update).reply_text(_t(lang,
             "📸 No snapshots recorded yet.\n\n"
             "<i>The agent is told to snapshot a VM before changing it, and each one "
             "it takes shows up here so it can be cleaned up later.</i>",
@@ -12971,7 +13155,7 @@ async def cmd_agentstatus(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                              already_html=True)
         return
 
-    msg = await update.message.reply_text(_t(lang, f"🩺 Checking {len(TIERS)} tier(s)…", f"🩺 Cek {len(TIERS)} tier…"))
+    msg = await _msg(update).reply_text(_t(lang, f"🩺 Checking {len(TIERS)} tier(s)…", f"🩺 Cek {len(TIERS)} tier…"))
     try:
         results = await asyncio.wait_for(check_all_tiers(), timeout=AGENTSTATUS_PROBE_TIMEOUT + 15)
     except asyncio.TimeoutError:
@@ -13896,6 +14080,7 @@ def main() -> None:
     app.add_handler(CommandHandler("boundaries", cmd_boundaries))
     app.add_handler(CommandHandler("menu", cmd_menu))
     app.add_handler(CallbackQueryHandler(cmd_menu_button, pattern="^menu:"))
+    app.add_handler(CallbackQueryHandler(cmd_menu_edit_button, pattern="^menuedit:"))
     app.add_handler(CommandHandler("update", cmd_update))
     app.add_handler(CallbackQueryHandler(cmd_update_button, pattern="^upd:"))
     app.add_handler(CommandHandler("setbrief", cmd_setbrief))

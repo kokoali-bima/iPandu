@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.2b.101 -- an Exit button, and each room can pick its own /menu
+
+Ported from iSmart-LA. Two things asked for directly about the /menu
+shipped in v0.2b.100.
+
+**Exit.** A closing button next to the panel -- taps `_safe_edit()` with no
+`reply_markup` of its own, so v0.2b.100's own empty-keyboard default does the
+actual work: the panel just goes away. Nothing new to build there, only a
+button to reach it from.
+
+**Customize.** `/menu`'s own "⚙️ Customize" button opens a checklist of every
+zero/optional-argument command that answers on a bare tap (18 of them, up
+from the fixed 8) -- toggle, then Save. What a room picks is saved per room
+in `menu_prefs.json`, the same shape as `chat_language.json`, and is what
+`/menu` builds from afterward.
+
+Gated like any other room-wide setting (`_may_authorize_group_action`: owner
+anywhere, or a registered group's own admin) -- it changes what EVERYONE in
+the room sees, so it is not a per-person preference the way, say, `/lang`
+is. A saved choice that has since stopped existing (a command renamed or
+removed later) is dropped rather than carried forward as a dead button, and
+if everything saved is gone the room falls back to the original default
+eight rather than an empty menu.
+
+Wiring ten more commands into the pool surfaced the exact same class of bug
+`/menu` itself was built to fix in v0.2b.100: `cmd_memory`, `cmd_tools`,
+`cmd_mcpservers`, `cmd_learned`, `cmd_gdrivestatus`, `cmd_mode` and
+`cmd_snapshots` all still reached for `update.message` directly, which is
+`None` on a button tap. Switched to `_msg(update)`, same as before;
+`cmd_schedules` and `cmd_providers` were already clean.
+
+While here: `mcp_servers.json` and `write_mode.json` were missing from
+`.gitignore` -- the same shape of gap that cost a service-account key
+elsewhere (a runtime state file with no rule written for it is one
+`git add -A` away from being committed) -- and `write_mode.json` was also
+missing from `HARDEN_600`/`install.sh`'s hardening list, alongside the new
+`menu_prefs.json`. Fixed all four.
+
+**1739/1739 across 69 suites** (`test_menu.py` grown to 77 checks: the
+default set, Exit, the permission gate, toggle/save/reset/cancel, refusing
+to save an empty selection, and the stale-action fallback).
+
 ## v0.2b.100 -- the native command menu, a tappable /menu, buttons that stop lingering, and three CI failures that had been red since v0.2b.99
 
 Ported from iSmart-LA, adapted where the two repos have already diverged
