@@ -6,7 +6,7 @@
 **Infrastructure monitoring and investigation, at a fraction of a full agent
 framework's token cost.**
 
-[![Status](https://img.shields.io/badge/status-v0.2b.102%20beta-blueviolet)](#why-this-exists)
+[![Status](https://img.shields.io/badge/status-v0.2b.103%20beta-blueviolet)](#why-this-exists)
 [![License](https://img.shields.io/badge/license-proprietary-lightgrey)](#credits)
 [![Python](https://img.shields.io/badge/python-3.10--3.13-blue)](#system-requirements)
 [![Architecture](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-success)](#system-requirements)
@@ -31,7 +31,7 @@ A report doesn't have to stop at the chat: it can land straight in a shared
 [Google Drive](#google-drive-optional) folder too, connected the same explicit way as
 everything else here -- through Telegram, not a config file.
 
-> **Status: v0.2b.102 -- early/beta.** Built and battle-tested against a real production
+> **Status: v0.2b.103 -- early/beta.** Built and battle-tested against a real production
 > Proxmox VE cluster over several days of iteration, including a live-fire test of the
 > unlock/PIN/snapshot flow against real infrastructure. Works well; still has known
 > rough edges (see [Known limitations](#known-limitations)).
@@ -161,12 +161,11 @@ that could drift back on.
 Telegram message
       |
       v
- lite_agent.py --- tries 4 tiers, cheapest first, falls through on failure ---
+ lite_agent.py --- tries 3 tiers, cheapest first, falls through on failure ---
       |
       +-- 1. agy (Antigravity CLI) -- Gemini Flash        "mini"       (fixed-price, Google AI Pro/Ultra)
       +-- 2. agy (Antigravity CLI) -- Gemini Pro-low       "mini pro"   (fixed-price, Google AI Pro/Ultra)
-      +-- 3. claude (Claude Code CLI) -- Haiku             "dede iku"   (fixed-price, Claude Pro/Max)
-      +-- 4. claude (Claude Code CLI) -- Sonnet            "dede nnet"  (fixed-price, Claude Pro/Max)
+      +-- 3. claude (Claude Code CLI) -- Sonnet            "dede nnet"  (fixed-price, Claude Pro/Max)
 ```
 
 **Both sides are fixed-price subscriptions, not pay-per-token API billing.** Gemini runs
@@ -181,7 +180,7 @@ Claude Code usage on the same account.
 - Every reply ends with a small tag (`— by mini`, `— by dede nnet`, etc.) showing which
   tier actually answered, so escalations away from the cheap default are visible at a
   glance without digging through logs.
-- Each of the 4 tiers keeps its **own** conversation history. They don't share context
+- Each of the 3 tiers keeps its **own** conversation history. They don't share context
   with each other -- if a turn falls through from Gemini to Claude, Claude answers that
   turn cold. (Trade-off found necessary in testing: letting one tier resume a
   conversation another tier started produced a single turn costing several times more
@@ -193,14 +192,15 @@ Claude Code usage on the same account.
 
 ### `/usemodel` -- an opt-in override, not a new default
 
-The 4-tier chain above is fixed on purpose (see "Design principles" below) -- this
+The 3-tier chain above is fixed on purpose (see "Design principles" below) -- this
 deployment's own needs, cheapest first, not a general knob. `/usemodel` doesn't change
-that default; it adds two **extra** tiers that sit outside the automatic chain entirely,
-reachable only by asking for one by name, for a case that genuinely needs more than the
-default chain offers:
+that default; it adds three **extra** tiers that sit outside the automatic chain
+entirely, reachable only by asking for one by name, for a case that genuinely needs
+more than the default chain offers:
 
 ```
 +-- Claude Opus              "dede opus"      (fixed-price, Claude Pro/Max)
++-- Claude Haiku              "dede iku"       (fixed-price, Claude Pro/Max)
 +-- Gemini Pro-high           "mini pro max"   (fixed-price, Google AI Pro/Ultra)
 ```
 
@@ -211,7 +211,7 @@ chain still backs it up if it's ever unavailable, rather than hard-failing (the
 The override is per-chat -- a group and a DM can each have their own, independently.
 
 Gated the same as `/addserver` (owner anywhere, or a registered group's own admin):
-picking Opus or Pro-high spends this deployment's own shared subscription quota, so
+picking any of these spends this deployment's own shared subscription quota, so
 it isn't left open to anyone who can merely talk to the bot.
 
 ## Design principles
@@ -1195,7 +1195,7 @@ systemd/
   looked more like an intermittent internal race condition on Google's side than a hard
   expiry -- the automatic Claude fallback absorbs this gracefully when it happens, so
   it costs a failed attempt, not a broken response).
-- **No built-in usage cap.** The 4-tier fallback and `/new` discipline keep normal usage
+- **No built-in usage cap.** The 3-tier fallback and `/new` discipline keep normal usage
   cheap, but nothing currently stops a single very large, very exploratory request from
   eating a large chunk of a plan's usage quota in one turn (both subscriptions are
   fixed-price, but still rate/usage-limited, not unlimited). A hard per-turn budget

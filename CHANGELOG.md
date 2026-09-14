@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.2b.103 -- default combo drops Claude Haiku: three tiers, not four
+
+At the user's request: the automatic fallback chain (Gemini Flash "mini" ->
+Gemini Pro-low "mini pro" -> Claude Sonnet "dede nnet") no longer includes
+Claude Haiku ("dede iku"). Not deleted outright -- moved from `_DEFAULT_TIERS`
+into `EXTRA_TIERS`, so it is still reachable with an explicit `/usemodel dede
+iku`, exactly the same way Opus and Gemini Pro-high already were.
+`CLAUDE_MODEL_PRIMARY` itself is unchanged -- still defaults to the Haiku
+model id, still what old session-migration code and `/graduate`'s
+target-picking fall back to for historical Claude sessions that predate
+this change.
+
+README's architecture diagram, the `/usemodel` section, and the "Design
+principles" usage-cap note all updated from 4 tiers to 3. Every test that
+touches `TIERS`/`ALL_TIERS`/`CLAUDE_MODEL_PRIMARY` passes unchanged.
+
+Same change applied to iSmart-LA (its own separate git history) in its own
+commit, at the same explicit request covering both projects.
+
 ## v0.2b.102 -- credits no longer shared with iSmart-LA
 
 iPandu's own thing now, not a mirror: the required attribution (`LICENSE`,

@@ -37,15 +37,16 @@ Design principles:
     resumable conversations (one per "case") instead of one ever-growing
     thread -- so picking up yesterday's case back up doesn't require
     dragging in today's unrelated context, and vice versa.
-  - Four explicit fallback tiers, cheapest first: Gemini Flash ("mini") ->
-    Gemini Pro-low ("mini pro") -> Claude Haiku ("dede iku") -> Claude Sonnet
-    ("dede nnet"). BOTH sides are fixed-price subscriptions, not pay-per-
-    token API billing: Gemini via the Antigravity CLI (agy) on a Google AI
-    Pro/Ultra plan, Claude via Claude Code's own OAuth sign-in on a Claude
-    Pro (or higher) plan. Gemini is tried first anyway -- not to dodge
-    per-token cost, but to spread routine load across a SEPARATE subscription
-    and keep the Claude plan's own usage quota in reserve for when it's
-    genuinely needed.
+  - Three explicit fallback tiers, cheapest first: Gemini Flash ("mini") ->
+    Gemini Pro-low ("mini pro") -> Claude Sonnet ("dede nnet"). Claude Haiku
+    ("dede iku") is not in this automatic chain -- reachable only by an
+    explicit /usemodel, the same as Opus. BOTH sides of the chain are
+    fixed-price subscriptions, not pay-per-token API billing: Gemini via the
+    Antigravity CLI (agy) on a Google AI Pro/Ultra plan, Claude via Claude
+    Code's own OAuth sign-in on a Claude Pro (or higher) plan. Gemini is
+    tried first anyway -- not to dodge per-token cost, but to spread routine
+    load across a SEPARATE subscription and keep the Claude plan's own usage
+    quota in reserve for when it's genuinely needed.
 """
 
 from __future__ import annotations
@@ -3416,7 +3417,7 @@ def setup_summary() -> list[tuple[str, bool, str]]:
     return [
         ("Gemini (Antigravity)", agy_signed_in(), "the primary tiers -- mini / mini pro"),
         ("Claude Code", claude_signed_in(),
-         "gateway configured" if USE_GATEWAY else "the fallback tiers -- dede iku / dede nnet"),
+         "gateway configured" if USE_GATEWAY else "the fallback tier -- dede nnet"),
         ("Security PIN", pin_is_set(), "guards changes to production and scheduled tasks"),
         ("Environment brief", brief_configured(), "what this agent looks after"),
     ]
@@ -3525,7 +3526,7 @@ if LEARNED_MAX_FACTS < 1:
 # tried first, and the chain moves on only when a tier fails in a way that
 # another tier could plausibly do better (see _classify_failure).
 #
-#   TIERS=agy:gemini-3.7-flash-medium:mini,claude:claude-haiku-4-5-20251001:dede iku
+#   TIERS=agy:gemini-3.7-flash-medium:mini,claude:claude-sonnet-5:dede nnet
 #          ^^^ provider  ^^^ model                  ^^^ label shown as "— by <label>"
 #
 # One list rather than four separate PRIMARY/FALLBACK variables, because the
@@ -3535,13 +3536,18 @@ if LEARNED_MAX_FACTS < 1:
 #
 # Deployments that predate this still work: with TIERS unset, the chain is
 # rebuilt from the old AGY_/CLAUDE_MODEL_* variables in their original order.
+#
+# Claude Haiku ("dede iku", CLAUDE_MODEL_PRIMARY) is deliberately NOT in this
+# default chain -- removed 2026-09-15 at the user's request, leaving three
+# tiers instead of four: two Gemini, straight to Sonnet. It still exists as
+# an EXTRA_TIERS entry below, reachable with an explicit /usemodel, exactly
+# like Opus -- not deleted outright, just no longer tried automatically.
 # --------------------------------------------------------------------------
 
 KNOWN_PROVIDERS = ("agy", "claude")
 _DEFAULT_TIERS = (
     f"agy:{AGY_MODEL_PRIMARY}:mini,"
     f"agy:{AGY_MODEL_FALLBACK}:mini pro,"
-    f"claude:{CLAUDE_MODEL_PRIMARY}:dede iku,"
     f"claude:{CLAUDE_MODEL_FALLBACK}:dede nnet"
 )
 
@@ -3586,14 +3592,15 @@ BACKEND_LABELS = {t["model"]: t["label"] for t in TIERS}
 
 # --------------------------------------------------------------------------
 # Extra tiers -- /usemodel only, NEVER part of the automatic fallback chain
-# above. Reaching for Opus or Gemini Pro-high on every routine turn would burn
-# through the shared subscription fast (see the ordering rationale above);
-# kept reachable only when someone deliberately names one for a case that
-# genuinely needs it. The default chain and its order are untouched by these
-# existing at all.
+# above. Reaching for Opus, Haiku, or Gemini Pro-high on every routine turn
+# would burn through the shared subscription fast (see the ordering
+# rationale above); kept reachable only when someone deliberately names one
+# for a case that genuinely needs it. The default chain and its order are
+# untouched by these existing at all.
 # --------------------------------------------------------------------------
 EXTRA_TIERS = _parse_tiers(
     "claude:claude-opus-5:dede opus,"
+    f"claude:{CLAUDE_MODEL_PRIMARY}:dede iku,"
     "agy:gemini-3.1-pro-high:mini pro max"
 )
 BACKEND_LABELS.update({t["model"]: t["label"] for t in EXTRA_TIERS})
@@ -4464,9 +4471,11 @@ def _normalize_agy_result(parsed: dict) -> dict:
 
 
 # --------------------------------------------------------------------------
-# Combo orchestrator: 4 explicit tiers, cheapest first --
+# Combo orchestrator: 3 explicit tiers, cheapest first --
 #   agy flash-medium ("mini") -> agy pro-low ("mini pro")
-#   -> claude haiku ("dede iku") -> claude sonnet ("dede nnet")
+#   -> claude sonnet ("dede nnet")
+# (claude haiku, "dede iku", is reachable only via an explicit /usemodel --
+# see EXTRA_TIERS)
 # --------------------------------------------------------------------------
 
 # How many model turns may be genuinely in flight at once, process-wide.
